@@ -26,6 +26,11 @@ on:
         required: true
         type: string
         default: '["self-hosted","linux","x64","nabu"]'
+      droidspaces:
+        description: 'Merge the Droidspaces kernel fragment (PID_NS etc.) and verify it'
+        required: true
+        type: boolean
+        default: true
       release:
         description: 'Attach the zip to a GitHub Release'
         required: true
@@ -80,6 +85,7 @@ jobs:
         env:
           CRDROID_BRANCH: ${{ github.event.inputs.branch }}
           VARIANT: ${{ github.event.inputs.variant }}
+          DROIDSPACES: ${{ github.event.inputs.droidspaces == 'true' && '1' || '0' }}
         run: bash scripts/build-rom.sh
 
       - name: Publish release
@@ -94,6 +100,7 @@ jobs:
             --tag "nabu-17.0-${{ github.run_number }}" \
             --title "crDroid 17.0 nabu — build ${{ github.run_number }}" \
             --notes "Branch ${{ github.event.inputs.branch }}, variant ${{ github.event.inputs.variant }}.
+          kernel: \`${{ steps.build.outputs.kernel }}\` — droidspaces: \`${{ steps.build.outputs.droidspaces }}\`
           sha256: \`${{ steps.build.outputs.sha256 }}\`
           size: ${{ steps.build.outputs.size }} bytes
 

@@ -11,6 +11,8 @@
 #   JOBS            ninja parallelism           (default: nproc)
 #   CCACHE_DIR      ccache dir                  (default: $HOME/.ccache)
 #   MIN_FREE_GB     abort below this much free  (default: 120)
+#   DROIDSPACES     "1" = merge kernel/droidspaces-nabu.config into the kernel
+#                   build and verify the resulting .config (default: 0)
 #
 # Writes to $GITHUB_OUTPUT when running under Actions: zip, size, sha256.
 #
@@ -90,6 +92,14 @@ done
 printf '  kernel version: %s\n' \
     "$(awk -F' = ' '/^VERSION = /{v=$2} /^PATCHLEVEL = /{p=$2} /^SUBLEVEL = /{s=$2} END{print v"."p"."s}' kernel/xiaomi/nabu/Makefile)"
 
+# ---------- droidspaces ----------
+if [ "${DROIDSPACES:-0}" = "1" ]; then
+    log "droidspaces: wiring kernel config fragment"
+    bash "$(dirname "$0")/apply-droidspaces.sh" --tree "$TREE"
+else
+    log "droidspaces: off (pass DROIDSPACES=1 to enable container support)"
+fi
+
 # ---------- build ----------
 export USE_CCACHE=1
 export CCACHE_EXEC="$(command -v ccache)"
@@ -117,6 +127,15 @@ fi
 ZIP=$(ls -t out/target/product/nabu/crDroidAndroid-*.zip 2>/dev/null | head -1)
 [ -n "$ZIP" ] || die "build succeeded but no zip under out/target/product/nabu/"
 
+if [ "${DROIDSPACES:-0}" = "1" ]; then
+    log "droidspaces: verifying the built kernel config"
+    if ! bash "$(dirname "$0")/verify-kernel-config.sh" --tree "$TREE"; then
+        die "kernel built without the Droidspaces options - the fragment did not reach the build.
+Check that TARGET_KERNEL_CONFIG lists vendor/xiaomi/droidspaces.config and that
+merge_config did not reject it (see the kernel build log)."
+    fi
+fi
+
 SIZE=$(wc -c < "$ZIP" | tr -d ' ')
 SHA=$(sha256sum "$ZIP" | awk '{print $1}')
 
@@ -131,6 +150,8 @@ if [ -n "${GITHUB_OUTPUT:-}" ]; then
         echo "size=$SIZE"
         echo "sha256=$SHA"
         echo "name=$(basename "$ZIP")"
+        echo "kernel=$(awk -F' = ' '/^VERSION = /{v=$2} /^PATCHLEVEL = /{p=$2} /^SUBLEVEL = /{s=$2} END{print v"."p"."s}' "$TREE/kernel/xiaomi/nabu/Makefile")"
+        echo "droidspaces=${DROIDSPACES:-0}"
     } >> "$GITHUB_OUTPUT"
 fi
 
@@ -142,6 +163,8 @@ if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
         echo "|---|---|"
         echo "| branch | $BRANCH |"
         echo "| variant | $VARIANT |"
+        echo "| kernel | $(awk -F' = ' '/^VERSION = /{v=$2} /^PATCHLEVEL = /{p=$2} /^SUBLEVEL = /{s=$2} END{print v"."p"."s}' "$TREE/kernel/xiaomi/nabu/Makefile") |"
+        echo "| droidspaces | $([ "${DROIDSPACES:-0}" = "1" ] && echo 'enabled + verified' || echo 'off') |"
         echo "| file | \`$(basename "$ZIP")\` |"
         echo "| size | $((SIZE / 1048576)) MiB |"
         echo "| sha256 | \`$SHA\` |"

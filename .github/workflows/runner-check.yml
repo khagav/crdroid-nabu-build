@@ -68,9 +68,10 @@ jobs:
           if [ "$FREE_GB" -lt 400 ]; then
             {
               echo
-              echo "This runner cannot build AOSP. GitHub-hosted runners have 14 GB SSD;"
-              echo "freeing caches gets you ~60 GB, still 6x short of the 250 GB checkout."
-              echo "Use a self-hosted runner with >= 400 GB disk. See README."
+              echo "This runner cannot build AOSP."
+              echo "Measured on ubuntu-latest (2026-10): ~87 GB free on the workspace"
+              echo "volume, 15 GB RAM. A crDroid tree needs ~250 GB checkout + 150 GB out,"
+              echo "and 32 GB+ RAM. Use a self-hosted runner with >= 400 GB. See README."
             } | tee -a "$GITHUB_STEP_SUMMARY"
             exit 1
           fi

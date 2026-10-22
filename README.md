@@ -10,18 +10,20 @@
 |---|---|---|---|
 | `runner-check` | ✅ 能 | 无 | 告诉你这台 runner 够不够格 |
 | `publish-official` | ✅ 能 | 无 | 官方 17.0 包 + 校验 + GitHub Release |
-| `build-rom` | ❌ **不能** | **自托管 runner：≥400 GB 磁盘 / ≥32 GB 内存 / Linux x86_64** | 你自己编的 ROM |
+| `build-rom` | ❌ **不能** | **自托管 runner：≥400 GB 磁盘 / ≥32 GB 内存 / Linux x86_64** | 你自己编的 ROM（默认带 Droidspaces 内核支持） |
 
 **为什么 `build-rom` 不能在托管 runner 上跑**（这是硬限制，不是配置问题）：
 
-| 项 | GitHub 托管 runner | AOSP 需要 |
+| 项 | GitHub 托管 runner（**实测**，run #2） | AOSP 需要 |
 |---|---|---|
-| 磁盘 | **14 GB** SSD（清缓存最多腾到 ~60 GB） | **250 GB** 检出 + 150 GB 构建 |
-| 内存 | 16 GB | 32–64 GB |
-| 单任务时长 | **6 小时** | 4 核首次全量 6–12 小时 |
+| 磁盘 | **87 GB** 空闲（工作卷） | **250 GB** 检出 + 150 GB 构建 |
+| 内存 | **15 GB** | 32–64 GB |
+| 单任务时长 | **6 小时** | 8 核首次全量 4–8 小时 |
 | 更大规格 runner | 仅 **Team / Enterprise 组织**可用，且按分钟计费 | — |
 
-个人账号用不了 larger runner，所以「在 GitHub 上编」这件事，唯一真实的解法是**给仓库挂一台自托管 runner**。仓库里的 `runner-check` 就是用来当场验证这一点的。
+> 实测来源：`runner-check` 在 `ubuntu-latest` 上的真实输出 —— `Linux 7.0.0-1017-azure x86_64`、`glibc 2.43`、`free disk 87 GB`、`memory 15 GB`。官方文档写的 14 GB 是根分区口径；不管哪个口径，都差 4 倍以上。
+
+个人账号用不了 larger runner，所以「在 GitHub 上编」这件事，唯一真实的解法是**给仓库挂一台自托管 runner**。仓库里的 `runner-check` 就是用来当场验证这一点的——它现在跑出来的结论就是上面那张表。
 
 ---
 
@@ -95,9 +97,65 @@ sudo ./svc.sh install && sudo ./svc.sh start
 | `variant` | `userdebug` | `userdebug` / `user` / `eng` |
 | `branch` | `17.0` | crDroid manifest 分支 |
 | `runner` | `["self-hosted","linux","x64","nabu"]` | JSON 数组 |
+| `droidspaces` | `true` | 合并内核片段并**验证编出来的 .config**（见下一节） |
 | `release` | `true` | 是否建 Release 并挂包 |
 
-产物：`out/target/product/nabu/crDroidAndroid-17.0-<日期>-nabu-v13.0.zip`，成功时写进 run summary（大小 + sha256），失败时上传 `build-log` artifact。
+产物：`out/target/product/nabu/crDroidAndroid-17.0-<日期>-nabu-v13.0.zip`，成功时写进 run summary（内核版本、Droidspaces 状态、大小、sha256），失败时上传 `build-log` artifact。
+
+---
+
+## Droidspaces 支持（容器 / 内核配置）
+
+想在这台平板上跑 `systemd`、跑 Docker、跑一堆常驻服务，路线是 **Droidspaces**：容器直接跑在 Android 内核上，不需要换内核、不需要动分区，驱动全部继承原厂。代价是内核必须打开一组容器运行时需要的选项。
+
+### 现状（2026-10-22 核实）
+
+| 事实 | 值 | 来源 |
+|---|---|---|
+| crDroid 17.0 内核版本 | **4.14.357** | `kernel/xiaomi/nabu/Makefile` |
+| `CONFIG_PID_NS` | **`# CONFIG_PID_NS is not set`** | `arch/arm64/configs/vendor/sm8150-perf_defconfig` |
+| `CONFIG_NAMESPACES` / `CGROUPS` / `MEMCG` / `SECCOMP` / `VETH` / `BRIDGE` / `OVERLAY_FS` / `TUN` | 已经 `=y` | 同上 |
+| `CONFIG_BRIDGE_NETFILTER` | **显式关闭**（NAT 模式会缺这一环） | 同上 |
+| `CONFIG_SYSVIPC` / `POSIX_MQUEUE` / `USER_NS` / `MACVLAN` / `CGROUP_PIDS` | 未设置 | 同上 |
+| 社区特调内核 `Huiyicc/...-Droidspaces-OSS` | **4.14.325** —— 比 crDroid 的更旧 | 该仓库 `Makefile` |
+
+**结论：不要为了 Droidspaces 换掉 crDroid 的内核树。** 那棵特调树是 4.14.325，crDroid 17.0 已经是 4.14.357。正确做法是**在最新的 4.14.357 上叠加一份配置片段**——这正是 `kernel/droidspaces-nabu.config` 干的事。
+
+### 怎么用
+
+`build-rom` 的 `droidspaces` 输入默认就是 `true`，它会：
+
+1. 把 `kernel/droidspaces-nabu.config` 拷进内核树的 `arch/arm64/configs/vendor/xiaomi/droidspaces.config`；
+2. 把这一项追加到 `device/xiaomi/nabu/BoardConfig.mk` 的 `TARGET_KERNEL_CONFIG`（幂等，跑两次不会重复）；
+3. 编译（`merge_config.sh` 会合并，未知符号只告警不中断）；
+4. **编译后读 `out/.../obj/KERNEL_OBJ/.config` 逐项核对**，把表格写进 run summary；缺必需项就直接失败，不会让你刷一个"以为支持其实不支持"的包。
+
+手动跑：
+
+```bash
+DROIDSPACES=1 CRDROID_BRANCH=17.0 bash scripts/build-rom.sh
+# 单独验证已有构建：
+bash scripts/verify-kernel-config.sh --tree ~/crdroid
+```
+
+### 片段里放了什么
+
+来源是 Droidspaces 官方 `Documentation/Kernel-Configuration.md` 的 **Non-GKI（3.18–4.19）** 一节，逐条搬过来并注明用途：IPC（`SYSVIPC`/`POSIX_MQUEUE`）、命名空间（`PID_NS`/`UTS_NS`/`IPC_NS`/`NET_NS`/`USER_NS`）、seccomp、cgroups（`CGROUP_PIDS`/`CFS_BANDWIDTH`/`MEMCG_SWAP`）、`DEVTMPFS`、`OVERLAY_FS`、firmware loader、`VETH`/`BRIDGE`/`MACVLAN`、netfilter+NAT（IPv4 与 IPv6）、以及 `CONFIG_ANDROID_PARANOID_NETWORK` 关掉。
+
+⚠️ 两个必须知道的点：
+
+- **`merge_config` 不保证生效**。Kconfig 会按依赖关系裁剪，4.14 上有些符号（如 `NF_NAT_REDIRECT`、`NF_CONNTRACK_NETLINK`）根本不存在，会被静默忽略。所以 `verify-kernel-config.sh` 读的是**编出来的 .config**，不是片段文件。
+- **`CONFIG_ANDROID_PARANOID_NETWORK`** 若被其它片段重新打开，容器会没有外网（除非 gid 在 `AID_INET`）。验证脚本会单独告警这一条。
+
+### 刷完怎么确认
+
+```bash
+adb shell su -c 'zcat /proc/config.gz | grep -E "CONFIG_(PID_NS|SYSVIPC|DEVTMPFS)="'   # 若内核开了 IKCONFIG
+adb shell su -c 'ls /proc/self/ns/'          # 应有 cgroup ipc mnt net pid user uts
+adb shell su -c 'unshare -pf --mount-proc true && echo pid-ns-ok'
+```
+
+`/proc/self/ns/pid` 存在 + `unshare -p` 不报错，才说明 PID namespace 真的可用。
 
 ### `publish-official`
 
@@ -115,13 +173,17 @@ sudo ./svc.sh install && sudo ./svc.sh start
 
 ```
 .github/workflows/
-  runner-check.yml       # 这台 runner 够不够格
-  build-rom.yml          # 全量编译（需自托管）
+  runner-check.yml       # 这台 runner 够不够格（已在托管 runner 上实跑验证）
+  build-rom.yml          # 全量编译（需自托管），可选 Droidspaces 内核片段
   publish-official.yml   # 拉官方包 + 校验 + 发 Release
+kernel/
+  droidspaces-nabu.config  # 容器所需的 4.14 内核配置片段
 scripts/
-  setup-host.sh          # apt 依赖 + repo + gh + ccache，幂等
-  build-rom.sh           # 增量 sync + brunch，带磁盘守卫和重试
-  publish.sh             # 发 Release（gh 优先，curl 兜底）
+  setup-host.sh            # apt 依赖 + repo + gh + ccache，幂等
+  build-rom.sh             # 增量 sync + brunch，带磁盘守卫和重试
+  apply-droidspaces.sh     # 把片段接进内核构建（幂等，已验证）
+  verify-kernel-config.sh  # 读编出来的 .config 逐项核对（已验证）
+  publish.sh               # 发 Release（gh 优先，curl 兜底）
 ```
 
 **仓库里没有 AOSP 源码**，也不需要——源码树在 runner 的 `$HOME/crdroid`。
@@ -156,9 +218,9 @@ adb sideload crDroidAndroid-17.0-*-nabu-v13.0.zip
 
 ## 诚实声明
 
-- `publish-official` 的每一步都是标准工具，但它**没有在本仓库实际跑过**（首次 push 后才会有 run 记录）。
-- `build-rom` **没有在真机上验证过**，也**没有在 ≥400 GB 的 runner 上跑过**——本机是 macOS，编不了 AOSP。
-- 上游事实（分支、包名、日期、1.4 GiB 体积）核查于 **2026-10-22**，来源见 commit message 与 workflow 里的 URL。上游一改，`publish-official` 的日期参数要跟着改。
+- **已验证**：`runner-check` 在 GitHub 托管 runner 上真实跑过（run #2，`failure` 且是**预期失败**——它输出的就是上面那张 87 GB / 15 GB 的表）。`apply-droidspaces.sh` 与 `verify-kernel-config.sh` 在伪造的树/配置上跑过通过路径和失败路径。
+- **未验证**：`build-rom` 没在 ≥400 GB 的 runner 上跑过；`publish-official` 没实际发过 Release；Droidspaces 片段没有在真机内核上编译验证过——`merge_config` 是否全部生效，只能等第一次真实构建的 `verify-kernel-config.sh` 输出。
+- 上游事实（分支、内核版本、包名、日期、1.4 GiB 体积、Droidspaces 选项清单）核查于 **2026-10-22**。上游一改，`publish-official` 的日期参数和内核片段都要跟着改。
 - 本仓库只做"取包/编译/校验/发布"，不涉及解锁 bootloader（小米需要 Mi Unlock Tool，Windows only，7 天等待）。
 
 ---
