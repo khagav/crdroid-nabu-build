@@ -36,7 +36,7 @@ jobs:
   publish:
     name: fetch, verify, release
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 300
 
     steps:
       - uses: actions/checkout@v4
@@ -59,10 +59,46 @@ jobs:
         shell: bash
         env:
           NAME: crDroidAndroid-${{ github.event.inputs.android_version }}-${{ github.event.inputs.build_date }}-nabu-v${{ github.event.inputs.cr_version }}.zip
+          EXPECT: '1524594287'
         run: |
           set -u
-          curl -fL --retry 5 --retry-delay 10 --retry-all-errors \
-            -o "$NAME" "$SF_DIR/$NAME/download"
+          # SourceForge mirrors stall mid-transfer: measured on a residential
+          # link, the auto-selected mirror delivered 241 KB and then sat at
+          # 0 B/s forever. A plain `curl -fL --retry` does not notice that --
+          # it just hangs until the job timeout. So resume with -C -, kill a
+          # stalled attempt with --speed-time, and rotate mirrors.
+          MIRRORS="netix jaist cfhcable pilotfiber phoenixnap tenet"
+          N=$(echo $MIRRORS | wc -w)
+          fails=0
+          attempt=0
+          while :; do
+            have=0
+            [ -f "$NAME" ] && have=$(wc -c < "$NAME" | tr -d ' ')
+            if [ "$have" -ge "$EXPECT" ]; then
+              echo "complete: $have bytes"
+              break
+            fi
+            if [ "$fails" -ge 10 ]; then
+              echo "::error::10 consecutive attempts made no progress at $have bytes"
+              exit 1
+            fi
+            attempt=$((attempt + 1))
+            M=$(echo $MIRRORS | cut -d' ' -f $(( (attempt - 1) % N + 1 )))
+            echo "--- attempt $attempt  mirror=$M  have=$have ---"
+            curl -fL -C - \
+                 --speed-time 60 --speed-limit 2048 \
+                 --retry 2 --retry-delay 5 --retry-all-errors \
+                 -o "$NAME" "$SF_DIR/$NAME/download?use_mirror=$M" || true
+            new=0
+            [ -f "$NAME" ] && new=$(wc -c < "$NAME" | tr -d ' ')
+            if [ "$new" -gt "$have" ]; then
+              fails=0
+              echo "  +$((new - have)) bytes, now $new"
+            else
+              fails=$((fails + 1))
+              echo "::warning::mirror $M made no progress (fail $fails/10), rotating"
+            fi
+          done
           ls -lh "$NAME"
 
       - name: Verify
