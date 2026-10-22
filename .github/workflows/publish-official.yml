@@ -1,0 +1,135 @@
+name: publish-official
+
+# Pull the current crDroid 17.0 build for nabu from the project's SourceForge
+# space, verify it, and republish it as a GitHub Release with boot.img split out.
+#
+# This is the one pipeline that runs fine on a GitHub-hosted runner: it moves
+# 1.4 GB, it does not compile anything. Use it when you want a verified,
+# versioned artifact on your own repo without owning a build machine.
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_date:
+        description: 'Build date (YYYYMMDD) of the SourceForge zip'
+        required: true
+        type: string
+        default: '20261021'
+      cr_version:
+        description: 'crDroid version suffix'
+        required: true
+        type: string
+        default: '13.0'
+      android_version:
+        description: 'Android version in the file name'
+        required: true
+        type: string
+        default: '17.0'
+
+permissions:
+  contents: write
+
+env:
+  SF_DIR: https://sourceforge.net/projects/crdroid/files/nabu/13.x
+
+jobs:
+  publish:
+    name: fetch, verify, release
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: List what is actually available
+        shell: bash
+        run: |
+          set -u
+          echo "--- zips currently in $SF_DIR ---"
+          curl -fsSL "$SF_DIR/" \
+            | grep -oE 'crDroidAndroid-[0-9.]+-[0-9]{8}-nabu-v[0-9.]+[A-Za-z-]*\.zip' \
+            | sort -u | tee available.txt
+          echo
+          if ! grep -qx "crDroidAndroid-${{ github.event.inputs.android_version }}-${{ github.event.inputs.build_date }}-nabu-v${{ github.event.inputs.cr_version }}.zip" available.txt; then
+            echo "requested build not in the list above - pick one of those dates"
+            exit 1
+          fi
+
+      - name: Download
+        shell: bash
+        env:
+          NAME: crDroidAndroid-${{ github.event.inputs.android_version }}-${{ github.event.inputs.build_date }}-nabu-v${{ github.event.inputs.cr_version }}.zip
+        run: |
+          set -u
+          curl -fL --retry 5 --retry-delay 10 --retry-all-errors \
+            -o "$NAME" "$SF_DIR/$NAME/download"
+          ls -lh "$NAME"
+
+      - name: Verify
+        shell: bash
+        env:
+          NAME: crDroidAndroid-${{ github.event.inputs.android_version }}-${{ github.event.inputs.build_date }}-nabu-v${{ github.event.inputs.cr_version }}.zip
+        run: |
+          set -eu
+          SIZE=$(wc -c < "$NAME" | tr -d ' ')
+          MIB=$((SIZE / 1048576))
+          echo "size: ${SIZE} bytes (${MIB} MiB)"
+          if [ "$MIB" -lt 1200 ]; then echo "suspiciously small - truncated download?"; exit 1; fi
+
+          echo "--- zip integrity ---"
+          unzip -tq "$NAME" > /dev/null
+
+          echo "--- device assert ---"
+          DEV=$(unzip -p "$NAME" META-INF/com/android/metadata | sed -n 's/^pre-device=//p')
+          echo "pre-device: ${DEV:-<none>}"
+          [ "$DEV" = "nabu" ] || { echo "this zip is not for nabu"; exit 1; }
+
+          echo "--- payload ---"
+          unzip -l "$NAME" | grep -E 'IMAGES/(boot|dtbo|vbmeta|vendor_boot)\.img|payload\.bin' || true
+
+          SHA=$(sha256sum "$NAME" | awk '{print $1}')
+          echo "sha256: $SHA"
+          {
+            echo "### crDroid ${{ github.event.inputs.android_version }} nabu"
+            echo
+            echo "| item | value |"
+            echo "|---|---|"
+            echo "| file | \`$NAME\` |"
+            echo "| size | ${MIB} MiB |"
+            echo "| pre-device | nabu |"
+            echo "| sha256 | \`$SHA\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Split out boot.img
+        shell: bash
+        env:
+          NAME: crDroidAndroid-${{ github.event.inputs.android_version }}-${{ github.event.inputs.build_date }}-nabu-v${{ github.event.inputs.cr_version }}.zip
+        run: |
+          set -u
+          mkdir -p images
+          unzip -o -j "$NAME" 'IMAGES/boot.img' 'IMAGES/vendor_boot.img' 'IMAGES/dtbo.img' -d images 2>/dev/null || true
+          ls -lh images/ || true
+
+      - name: Publish release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          NAME: crDroidAndroid-${{ github.event.inputs.android_version }}-${{ github.event.inputs.build_date }}-nabu-v${{ github.event.inputs.cr_version }}.zip
+        run: |
+          set -u
+          TAG="nabu-17.0-${{ github.event.inputs.build_date }}"
+          bash scripts/publish.sh --file "$NAME" \
+            --tag "$TAG" \
+            --title "crDroid ${{ github.event.inputs.android_version }} nabu — ${{ github.event.inputs.build_date }}" \
+            --notes "Upstream build republished for verification. Source: crdroid SourceForge nabu/13.x.
+
+          sha256 is in the workflow run summary.
+
+          Flash: extract IMAGES/boot.img from the zip, \`fastboot flash boot boot.img\`,
+          reboot to recovery, format data (first install), then \`adb sideload\` the zip."
+          for img in images/*.img; do
+            [ -f "$img" ] && bash scripts/publish.sh --file "$img" --tag "$TAG" \
+              --title "crDroid ${{ github.event.inputs.android_version }} nabu — ${{ github.event.inputs.build_date }}"
+          done
+          true

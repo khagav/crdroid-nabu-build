@@ -1,0 +1,117 @@
+name: build-rom
+
+# Full crDroid (Android 17) build for the Xiaomi Pad 5 (nabu).
+#
+# REQUIRES A SELF-HOSTED RUNNER with >= 400 GB disk and >= 32 GB RAM.
+# GitHub-hosted runners have a 14 GB SSD and a 6 hour job cap - a full AOSP
+# checkout alone is 250 GB, so the default labels below point at a self-hosted
+# builder. See README for how to get one.
+
+on:
+  workflow_dispatch:
+    inputs:
+      variant:
+        description: 'Build variant'
+        required: true
+        type: choice
+        options: [userdebug, user, eng]
+        default: userdebug
+      branch:
+        description: 'crDroid manifest branch'
+        required: true
+        type: string
+        default: '17.0'
+      runner:
+        description: 'Runner labels as a JSON array'
+        required: true
+        type: string
+        default: '["self-hosted","linux","x64","nabu"]'
+      release:
+        description: 'Attach the zip to a GitHub Release'
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-rom
+  cancel-in-progress: false
+
+env:
+  CRDROID_TREE: /home/runner/crdroid
+  CCACHE_SIZE: 25G
+
+jobs:
+  build:
+    name: brunch nabu
+    runs-on: ${{ fromJSON(github.event.inputs.runner) }}
+    timeout-minutes: 1440
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fail fast if the runner is too small
+        shell: bash
+        run: |
+          set -u
+          echo "runner: $(uname -srm), $(nproc) cores, $(awk '/MemTotal/ {printf "%d", $2/1048576}' /proc/meminfo) GB RAM"
+          FREE_GB=$(df -Pk "$HOME" | awk 'NR==2 {printf "%d", $4/1024/1024}')
+          echo "free under \$HOME: ${FREE_GB} GB"
+          if [ "$FREE_GB" -lt 380 ]; then
+            {
+              echo "### Not enough disk"
+              echo
+              echo "Only **${FREE_GB} GB** free; a crDroid tree needs ~380 GB."
+              echo "GitHub-hosted runners have 14 GB. Point \`runner\` at a self-hosted"
+              echo "builder (labels \`self-hosted,linux,x64,nabu\`)."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+      - name: Install build dependencies
+        shell: bash
+        run: bash scripts/setup-host.sh
+
+      - name: Sync and build
+        id: build
+        shell: bash
+        env:
+          CRDROID_BRANCH: ${{ github.event.inputs.branch }}
+          VARIANT: ${{ github.event.inputs.variant }}
+        run: bash scripts/build-rom.sh
+
+      - name: Publish release
+        if: ${{ github.event.inputs.release == 'true' && steps.build.outputs.zip != '' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          bash scripts/publish.sh \
+            --file "${{ steps.build.outputs.zip }}" \
+            --tag "nabu-17.0-${{ github.run_number }}" \
+            --title "crDroid 17.0 nabu — build ${{ github.run_number }}" \
+            --notes "Branch ${{ github.event.inputs.branch }}, variant ${{ github.event.inputs.variant }}.
+          sha256: \`${{ steps.build.outputs.sha256 }}\`
+          size: ${{ steps.build.outputs.size }} bytes
+
+          Flash: extract IMAGES/boot.img, fastboot flash boot, then adb sideload this zip.
+          See https://github.com/crdroidandroid for upstream."
+
+      - name: Keep the build log on failure
+        if: failure()
+        shell: bash
+        run: |
+          mkdir -p build-log
+          cp "$CRDROID_TREE/brunch.log" build-log/brunch.log 2>/dev/null || \
+            echo "no brunch.log (failed before the build step)" > build-log/brunch.log
+          tail -200 build-log/brunch.log > build-log/tail.txt || true
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: build-log-${{ github.run_number }}
+          path: build-log/
+          retention-days: 7

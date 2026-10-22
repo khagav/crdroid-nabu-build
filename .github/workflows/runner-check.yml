@@ -1,0 +1,78 @@
+name: runner-check
+
+# Answers one question: can the selected runner build AOSP?
+# Run it on ubuntu-latest to see why hosted runners are not enough, and on your
+# self-hosted builder to confirm it qualifies before starting a 2 hour build.
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: 'Runner labels as a JSON array'
+        required: false
+        type: string
+        default: '["ubuntu-latest"]'
+  push:
+    paths:
+      - '.github/workflows/runner-check.yml'
+      - 'scripts/setup-host.sh'
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: preflight
+    runs-on: ${{ fromJSON(github.event.inputs.runner || '["ubuntu-latest"]') }}
+    timeout-minutes: 30
+
+    steps:
+      - name: Runner facts
+        shell: bash
+        run: |
+          set -u
+          echo "runner:  ${RUNNER_NAME:-unknown}"
+          echo "os:      $(uname -srm)"
+          echo "cpu:     $(nproc) cores"
+          echo "mem:     $(awk '/MemTotal/ {printf "%d", $2/1048576}' /proc/meminfo) GB"
+          echo "glibc:   $(ldd --version | head -1 | awk '{print $NF}')"
+          echo
+          echo "--- disk ---"
+          df -h "$RUNNER_WORKSPACE" 2>/dev/null || df -h /
+
+      - name: AOSP feasibility
+        shell: bash
+        run: |
+          set -u
+          DIR="${RUNNER_WORKSPACE:-$HOME}"
+          FREE_GB=$(df -Pk "$DIR" | awk 'NR==2 {printf "%d", $4/1024/1024}')
+          MEM_GB=$(awk '/MemTotal/ {printf "%d", $2/1048576}' /proc/meminfo)
+          CORES=$(nproc)
+
+          echo "free disk : ${FREE_GB} GB   (need 400)"
+          echo "memory    : ${MEM_GB} GB   (need 32-64)"
+          echo "cores     : ${CORES}"
+
+          {
+            echo "### Preflight: $(uname -m) / ${CORES} cores / ${MEM_GB} GB RAM / ${FREE_GB} GB free"
+            echo
+            echo "| requirement | needed | this runner | verdict |"
+            echo "|---|---|---|---|"
+            if [ "$FREE_GB" -ge 400 ]; then d="OK"; else d="**too small**"; fi
+            if [ "$MEM_GB" -ge 32 ]; then m="OK"; else m="**too small**"; fi
+            echo "| free disk | 400 GB | ${FREE_GB} GB | $d |"
+            echo "| memory | 32 GB+ | ${MEM_GB} GB | $m |"
+            echo "| OS | 64-bit Linux | $(uname -s) | OK |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$FREE_GB" -lt 400 ]; then
+            {
+              echo
+              echo "This runner cannot build AOSP. GitHub-hosted runners have 14 GB SSD;"
+              echo "freeing caches gets you ~60 GB, still 6x short of the 250 GB checkout."
+              echo "Use a self-hosted runner with >= 400 GB disk. See README."
+            } | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          echo "runner qualifies for a full crDroid build" | tee -a "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,6 @@
+*.zip
+*.img
+images/
+build-log/
+available.txt
+.DS_Store
