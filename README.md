@@ -27,9 +27,33 @@
 
 ---
 
-## 三条路线怎么选
+## 怎么选：先问两个问题
 
-### ① 只想拿到一个能刷的包 → `publish-official`
+```
+Q1  你要"自己编的"包吗？
+     要 ────────────────→ 路线 A：build-rom + 自托管 runner（没有机器就到此为止）
+     不要 ↓
+Q2  拿现成包时，要不要走 GitHub 这条流水线？
+     要 ────────────────→ 路线 B：publish-official
+     不要 ──────────────→ 路线 C：直接下
+```
+
+B 和 C **拿到的是同一个文件，二进制完全相同**。区别只在"校验、留档、刷机准备"，不在"包"。A 才是真的不一样——那是你自己编的，可以带 Droidspaces 内核支持。
+
+| | B `publish-official` | C 直接下 |
+|---|---|---|
+| 产物 | Release：zip + `boot.img` + `vendor_boot.img` + `dtbo.img`，sha256 写进 run summary | 只有一个 zip（1.42 GiB） |
+| 额外耗时 | 1.4 GB 下行 **+ 1.4 GB 上行** | 只有 1.4 GB 下行 |
+| 校验 | 自动四道：zip 完整性、体积下限、`pre-device=nabu`、sha256 落档 | 靠你自己；上游 17.0 没有 OTA json，也就没有公布的 sha256 |
+| 刷机准备 | `boot.img` 已拆好，直接 `fastboot flash boot` | 先 `unzip` 解 1.4 GB 才拿到 |
+| 防呆 | 下载后立刻比对机型 | 只能现场 `fastboot getvar product` |
+| 留档 | 固定在你仓库，上游删包不影响 | 上游 `13.x/` 只留最近几个，旧包会消失 |
+| 依赖 | GitHub Actions + 仓库里的校验脚本 | 只依赖 SourceForge |
+| 主要失败点 | 排队、上传限速 | 慢速/断线拿到截断包，且没校验发现不了 |
+
+**一句话**：B 没有让包变"更可信"，它只是把"上游给的字节"过一遍机器校验、拆开、留档。信任链还是 crDroid 维护者和 SourceForge。
+
+### B 路线：`publish-official`
 
 在 Actions 里手动跑 `publish-official`，填日期（默认 `20261021`）。它会：
 
@@ -43,7 +67,17 @@
 
 > Release asset 单文件上限 2 GB，1.4 GiB 的包放得下。**不要**用 Actions artifact 传它——Free 计划的 artifact 存储只有 500 MB。
 
-### ② 真的要自己编 → `build-rom` + 自托管 runner
+### C 路线：直接下
+
+```bash
+curl -L -O "https://sourceforge.net/projects/crdroid/files/nabu/13.x/crDroidAndroid-17.0-20261021-nabu-v13.0.zip/download"
+shasum -a 256 crDroidAndroid-17.0-20261021-nabu-v13.0.zip   # 自己记下来
+unzip -o crDroidAndroid-17.0-20261021-nabu-v13.0.zip 'IMAGES/*' -d rom
+```
+
+刷机步骤见本文末尾。
+
+### A 路线：`build-rom` + 自托管 runner
 
 需要一台 Linux 机器（物理机 / 云主机 / 家里闲置 PC），要求：
 
@@ -73,10 +107,6 @@ sudo ./svc.sh install && sudo ./svc.sh start
 然后 `bash scripts/setup-host.sh` 装依赖（apt 包、repo、gh、ccache），再在 Actions 里跑 `build-rom`。
 
 第一次 `repo sync` 约 250 GB，几小时；之后**增量**——源码树和 ccache 都放在 `$HOME/crdroid` / `$HOME/.ccache`（不在 workspace 里，不会被清理），所以第二次开始通常是 20–40 分钟。
-
-### ③ 没有机器、也不想租 → 用现成的官方包
-
-直接下 `crdroid/files/nabu/13.x/`，用 `publish-official` 的校验逻辑自己验一遍。刷机步骤见本文末尾。
 
 ---
 
