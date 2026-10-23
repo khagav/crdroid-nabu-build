@@ -1,0 +1,144 @@
+name: build-kernel
+
+# Build ONLY the nabu kernel (Image.gz) on a stock GitHub-hosted runner.
+#
+# This is the cheap path to Droidspaces support: no AOSP tree, no 250 GB
+# checkout, no self-hosted runner. The kernel is swapped into the existing
+# boot.img afterwards with scripts/repack-boot.py.
+#
+# Reference numbers for ubuntu-latest (4 vCPU / 16 GB / ~87 GB free):
+#   clone ~1.2 GB, toolchain ~1.3 GB, out/ ~4 GB, build 30-60 min.
+# That is well inside both the disk budget and the 6 h job cap.
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: 'Kernel commit to build'
+        required: true
+        type: string
+        default: 'a17239b2eda3ccba274456d87aab4fd6f0bb734d'
+      droidspaces:
+        description: 'Merge kernel/droidspaces-nabu.config (PID_NS, SYSVIPC, ...)'
+        required: true
+        type: boolean
+        default: true
+      lto:
+        description: 'Keep CONFIG_LTO_CLANG (slower, needs ~14 GB RAM)'
+        required: true
+        type: boolean
+        default: false
+      modules:
+        description: 'Also build modules (not needed: this kernel is monolithic)'
+        required: true
+        type: boolean
+        default: false
+      release:
+        description: 'Attach Image.gz to a GitHub Release'
+        required: true
+        type: boolean
+        default: true
+
+  # Pushing the workflow itself starts a build, so no token / manual click is
+  # needed to get the first artifact.
+  push:
+    branches: [main]
+    paths:
+      - 'kernel/**'
+      - 'scripts/build-kernel.sh'
+      - 'scripts/verify-kernel-config.sh'
+      - '.github/workflows/build-kernel.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-kernel
+  cancel-in-progress: false
+
+jobs:
+  kernel:
+    name: Image.gz
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+
+    env:
+      KSRC_COMMIT: ${{ github.event.inputs.commit || 'a17239b2eda3ccba274456d87aab4fd6f0bb734d' }}
+      DROIDSPACES: ${{ (github.event_name == 'push' || github.event.inputs.droidspaces == 'true') && '1' || '0' }}
+      LTO: ${{ github.event.inputs.lto == 'true' && '1' || '0' }}
+      MODULES: ${{ github.event.inputs.modules == 'true' && '1' || '0' }}
+      OUT: ${{ github.workspace }}/kout
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show runner capacity
+        run: |
+          echo "cpu=$(nproc) ram=$(awk '/MemTotal/{printf "%d GB", $2/1048576}' /proc/meminfo) free=$(df -Pk . | awk 'NR==2{printf "%d GB", $4/1024/1024}')"
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            bc bison flex libssl-dev libelf-dev libfl-dev \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            zip unzip rsync cpio kmod python3 device-tree-compiler
+
+      - name: Cache kernel source
+        uses: actions/cache@v4
+        with:
+          path: ~/kernel-src
+          key: ksrc-${{ env.KSRC_COMMIT }}
+          restore-keys: ksrc-
+
+      - name: Cache clang
+        uses: actions/cache@v4
+        with:
+          path: ~/toolchain
+          key: clang-r596125
+
+      - name: Build
+        run: bash scripts/build-kernel.sh
+
+      - name: Upload kernel artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: nabu-kernel-${{ github.run_number }}
+          path: kout/artifacts/
+          retention-days: 30
+
+      - name: Publish release
+        if: ${{ github.event_name == 'push' || github.event.inputs.release == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          TAG="kernel-$(date -u +%Y%m%d)-${{ github.run_number }}"
+          INFO=$(cat kout/artifacts/build-info.txt)
+          gh release create "$TAG" \
+            kout/artifacts/Image.gz \
+            kout/artifacts/kernel.config \
+            kout/artifacts/System.map \
+            kout/artifacts/build-info.txt \
+            --title "nabu kernel ${TAG}" \
+            --notes "\`\`\`
+          ${INFO}
+          \`\`\`
+
+          Flash: unpack Image.gz into boot.img with scripts/repack-boot.py, then
+          \`fastboot flash boot boot-new.img\`. dtbo/vendor_boot stay untouched."
+
+      - name: Keep the build log on failure
+        if: failure()
+        run: |
+          mkdir -p build-log
+          cp kout/.config build-log/kernel.config 2>/dev/null || true
+          echo "build failed - see the 'Build' step log above" > build-log/README.txt
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: kernel-log-${{ github.run_number }}
+          path: build-log/
+          retention-days: 7

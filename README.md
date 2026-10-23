@@ -8,9 +8,12 @@
 
 | 路线 | 能在 GitHub 托管 runner 上跑吗 | 需要什么 | 产出 |
 |---|---|---|---|
+| `build-kernel` | ✅ **能**（实测预算见下） | 无 | **`Image.gz`（可换进现有 boot.img）** |
 | `runner-check` | ✅ 能 | 无 | 告诉你这台 runner 够不够格 |
 | `publish-official` | ✅ 能 | 无 | 官方 17.0 包 + 校验 + GitHub Release |
-| `build-rom` | ❌ **不能** | **自托管 runner：≥400 GB 磁盘 / ≥32 GB 内存 / Linux x86_64** | 你自己编的 ROM（默认带 Droidspaces 内核支持） |
+| `build-rom` | ❌ **不能** | **自托管 runner：≥400 GB 磁盘 / ≥32 GB 内存 / Linux x86_64** | 你自己编的 ROM |
+
+> **要 Droidspaces 不需要编 ROM，只需要编内核。** 上一版把结论写成"云上编不了"，那是对**全量 ROM** 说的，对**内核**不成立：内核树 1.2 GB、工具链 1.3 GB、`out/` 4 GB，托管 runner 的 87 GB / 16 GB / 6 小时全部够用。`build-kernel` 就是这条路，详见下文。
 
 **为什么 `build-rom` 不能在托管 runner 上跑**（这是硬限制，不是配置问题）：
 
@@ -134,6 +137,69 @@ sudo ./svc.sh install && sudo ./svc.sh start
 
 ---
 
+## `build-kernel`：只编内核，托管 runner 就能跑
+
+目标只有一个：**给现有 ROM 换一个支持容器的内核**。ROM 本身不动，userdata 不动，root 不动。
+
+### 为什么这条路成立
+
+| 项 | 托管 runner（实测 `ubuntu-latest`） | 内核编译需要 |
+|---|---|---|
+| 磁盘 | 87 GB 空闲 | 源码 1.2 GB + 工具链 1.3 GB + `out/` ~4 GB |
+| 内存 | 15 GB | LTO 关闭时 4–6 GB |
+| 时长 | 6 小时/任务 | 4 核约 30–60 分钟 |
+
+差的只是"全量 AOSP 要 250 GB"，而这条路根本不 checkout AOSP。
+
+### 参数
+
+| 输入 | 默认 | 说明 |
+|---|---|---|
+| `commit` | `a17239b2eda3ccba274456d87aab4fd6f0bb734d` | 就是设备上正在跑的那个 commit |
+| `droidspaces` | `true` | 合并 `kernel/droidspaces-nabu.config` 并**逐项校验编出来的 .config** |
+| `lto` | `false` | 保留 `CONFIG_LTO_CLANG`。全量 LTO 在 4 核/16 GB 上容易 OOM 或超时，功能上无差别 |
+| `modules` | `false` | 这台机器的内核是单片式，不需要模块（见下） |
+| `release` | `true` | 把 `Image.gz` 等挂到 Release |
+
+推到 `main` 且改动命中 `kernel/**`、`scripts/build-kernel.sh`、该 workflow 时会**自动跑一次**，不需要手动点。
+
+### 产物
+
+`Image.gz`（约 24 MB）、`Image`、`kernel.config`、`System.map`、`build-info.txt`（commit / 内核 release 串 / clang 版本 / sha256）。
+
+### 本地换进 boot.img
+
+```bash
+python3 scripts/repack-boot.py \
+  --template boot.img \
+  --kernel Image.gz \
+  --out boot-new.img
+```
+
+`repack-boot.py` 只替换内核区，header（v3 / page 4096 / cmdline / os_version）和 ramdisk 原样保留。已用真机 `boot.img` 做过往返自测：把原内核抽出来再打回去，除末 64 字节 AVB footer 外**逐字节一致**。AVB footer 会被清零——内容已经变了，旧哈希没有意义，而 bootloader 是解锁的（`orange`）。
+
+刷入与回滚：
+
+```bash
+adb reboot bootloader
+fastboot flash boot boot-new.img
+fastboot reboot
+# 不行就回滚：
+fastboot flash boot boot.img        # 原厂那份
+```
+
+**不要**碰 `vendor_boot` / `dtbo`：前者是 Magisk 的 ramdisk 宿主，后者装 dtb（这个 boot.img 里没有 FDT，已核实）。
+
+### 三个必须一致的东西
+
+换内核而不换 ROM，只有三处会对不上，都已经钉住了：
+
+1. **版本串**。设备是 `4.14.357-perf-ga17239b2eda3`，`scripts/setlocalversion` 会读 `.scmversion`，所以构建脚本把它写成 `-g<commit前12位>`，浅克隆也不会漂。
+2. **vermagic**。`msm-geni-ir.ko` 报的是 `4.14.357-perf-ga17239b2eda3 SMP preempt mod_unload modversions aarch64`——版本串一致 + 同一份 .config 就自动一致。
+3. **模块 ABI**。`CONFIG_SYSVIPC` 会把 `sysvsem/sysvshm` 插在 `comm` 之后，导致 `task_struct` 后续字段整体位移。实测 `/vendor/lib/modules` 只有 `msm-geni-ir.ko` 一个真模块、`lsmod` 为空，内核实际是单片式，所以这个位移在这里无害。**换 ROM 或厂商加了模块，就必须连模块一起重编。**
+
+---
+
 ## Droidspaces 支持（容器 / 内核配置）
 
 想在这台平板上跑 `systemd`、跑 Docker、跑一堆常驻服务，路线是 **Droidspaces**：容器直接跑在 Android 内核上，不需要换内核、不需要动分区，驱动全部继承原厂。代价是内核必须打开一组容器运行时需要的选项。
@@ -203,12 +269,15 @@ adb shell su -c 'unshare -pf --mount-proc true && echo pid-ns-ok'
 
 ```
 .github/workflows/
+  build-kernel.yml       # 只编内核（托管 runner 可跑）← Droidspaces 走这条
   runner-check.yml       # 这台 runner 够不够格（已在托管 runner 上实跑验证）
   build-rom.yml          # 全量编译（需自托管），可选 Droidspaces 内核片段
   publish-official.yml   # 拉官方包 + 校验 + 发 Release
 kernel/
-  droidspaces-nabu.config  # 容器所需的 4.14 内核配置片段
+  droidspaces-nabu.config  # 容器所需的 4.14 内核配置片段（按真机实测缺口整理）
 scripts/
+  build-kernel.sh          # 拉内核树 + 合并片段 + 编 Image.gz，钉版本串
+  repack-boot.py           # 把 Image.gz 换进现有 boot.img（往返自测通过）
   setup-host.sh            # apt 依赖 + repo + gh + ccache，幂等
   build-rom.sh             # 增量 sync + brunch，带磁盘守卫和重试
   apply-droidspaces.sh     # 把片段接进内核构建（幂等，已验证）
@@ -249,7 +318,8 @@ adb sideload crDroidAndroid-17.0-*-nabu-v13.0.zip
 ## 诚实声明
 
 - **已验证**：`runner-check` 在 GitHub 托管 runner 上真实跑过（run #2，`failure` 且是**预期失败**——它输出的就是上面那张 87 GB / 15 GB 的表）。`apply-droidspaces.sh` 与 `verify-kernel-config.sh` 在伪造的树/配置上跑过通过路径和失败路径。
-- **未验证**：`build-rom` 没在 ≥400 GB 的 runner 上跑过；`publish-official` 没实际发过 Release；Droidspaces 片段没有在真机内核上编译验证过——`merge_config` 是否全部生效，只能等第一次真实构建的 `verify-kernel-config.sh` 输出。
+- **已验证（2026-10-23，真机）**：`boot.img` 结构（header v3 / page 4096 / 内核是 gzip 的 57.5 MB arm64 Image / 内核区**无 FDT** / 尾部有 AVB footer）；`repack-boot.py` 用原内核做往返，除末 64 字节外逐字节一致；设备 `zcat /proc/config.gz` 得到的缺口清单（PID_NS / SYSVIPC / POSIX_MQUEUE / USER_NS / DEVTMPFS / CGROUP_PIDS / MACVLAN / BRIDGE_NETFILTER / NF_TABLES）；`/vendor/lib/modules` 仅 `msm-geni-ir.ko` 一个模块且 `lsmod` 为空；`msm-geni-ir.ko` 的 vermagic。
+- **未验证**：`build-kernel` **还没在 CI 上跑过一次**——第一次运行的日志才算数（本地网络到 `android.googlesource.com` 被代理拦成 502，clang 下载地址只能在 CI 上验证）。`build-rom` 没在 ≥400 GB 的 runner 上跑过；`publish-official` 没实际发过 Release；新内核没刷进真机，`unshare -p` 能不能过要刷完才知道。
 - 上游事实（分支、内核版本、包名、日期、1.4 GiB 体积、Droidspaces 选项清单）核查于 **2026-10-22**。上游一改，`publish-official` 的日期参数和内核片段都要跟着改。
 - 本仓库只做"取包/编译/校验/发布"，不涉及解锁 bootloader（小米需要 Mi Unlock Tool，Windows only，7 天等待）。
 
