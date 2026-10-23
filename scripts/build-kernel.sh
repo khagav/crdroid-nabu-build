@@ -12,7 +12,7 @@
 #   KSRC_BRANCH  fallback branch           (default: 17.0)
 #   KSRC_DIR     source checkout dir       (default: $HOME/kernel-src)
 #   OUT          out dir                   (default: $PWD/kout)
-#   CLANG_VER    AOSP prebuilt clang       (default: r596125, what crDroid used)
+#   CLANG_VER    AOSP prebuilt clang       (default: r547379, newest published)
 #   DROIDSPACES  1 = merge kernel/droidspaces-nabu.config
 #   LTO          1 = keep CONFIG_LTO_CLANG (slow, RAM hungry), 0 = off
 #   MODULES      1 = also build modules (not needed: this kernel is monolithic)
@@ -27,7 +27,7 @@ KSRC_COMMIT="${KSRC_COMMIT:-a17239b2eda3ccba274456d87aab4fd6f0bb734d}"
 KSRC_BRANCH="${KSRC_BRANCH:-17.0}"
 KSRC_DIR="${KSRC_DIR:-$HOME/kernel-src}"
 OUT="${OUT:-$PWD/kout}"
-CLANG_VER="${CLANG_VER:-r596125}"
+CLANG_VER="${CLANG_VER:-r547379}"
 DROIDSPACES="${DROIDSPACES:-1}"
 LTO="${LTO:-0}"
 MODULES="${MODULES:-0}"
@@ -76,15 +76,49 @@ printf '%s\n' "-g$(printf '%s' "$ACTUAL" | cut -c1-12)" > .scmversion
 log "pinned localversion: $(cat .scmversion)"
 
 # ------------------------------------------------------------- 3. toolchain
+# The device banner says "based on r596125", but that build came off Google's
+# internal forge and is NOT published: the public prebuilt tree
+# (prebuilts/clang/host/linux-x86, refs/heads/main) tops out at clang-r547379.
+# So try the claimed version first and fall back to what actually exists.
 TC="${TC:-$HOME/toolchain/clang}"
-if [ ! -x "$TC/bin/clang" ]; then
-    log "downloading AOSP clang $CLANG_VER"
-    mkdir -p "$TC"
-    URL="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-${CLANG_VER}.tar.gz"
-    if ! curl -fsSL --retry 3 --retry-delay 5 "$URL" | tar -xz -C "$TC"; then
-        die "could not download clang $CLANG_VER from $URL"
+BASE="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main"
+
+normalize_tc() {
+    # The +archive tarball normally extracts with no wrapper dir; tolerate one.
+    if [ ! -x "$TC/bin/clang" ]; then
+        inner=$(find "$TC" -maxdepth 4 -type f -path '*/bin/clang' 2>/dev/null | head -1)
+        if [ -n "$inner" ]; then
+            d=$(cd "$(dirname "$inner")/.." && pwd)
+            if [ "$d" != "$TC" ]; then
+                mv "$TC" "$TC.old.$$"
+                mv "$d" "$TC"
+                rm -rf "$TC.old.$$"
+            fi
+        fi
     fi
+}
+
+if [ ! -x "$TC/bin/clang" ]; then
+    mkdir -p "$TC"
+    for v in "$CLANG_VER" r547379; do
+        log "trying clang $v"
+        if curl -fsSL --retry 2 --retry-delay 3 -o "$TC.tgz" "$BASE/clang-$v.tar.gz"; then
+            if tar -xzf "$TC.tgz" -C "$TC"; then
+                rm -f "$TC.tgz"
+                normalize_tc
+                if [ -x "$TC/bin/clang" ]; then
+                    log "using clang $v"
+                    break
+                fi
+                log "clang $v extracted but bin/clang is missing"
+            fi
+        else
+            log "clang $v is not published"
+        fi
+        rm -rf "$TC"; mkdir -p "$TC"
+    done
 fi
+[ -x "$TC/bin/clang" ] || die "no usable clang toolchain (tried $CLANG_VER, r547379)"
 export PATH="$TC/bin:$PATH"
 clang --version | head -2
 

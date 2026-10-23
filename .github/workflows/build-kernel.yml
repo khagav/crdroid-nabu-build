@@ -95,10 +95,14 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/toolchain
-          key: clang-r596125
+          key: clang-toolchain-r547379
+          restore-keys: clang-toolchain
 
       - name: Build
-        run: bash scripts/build-kernel.sh
+        shell: bash
+        run: |
+          set -o pipefail
+          bash scripts/build-kernel.sh 2>&1 | tee build-log.txt
 
       - name: Upload kernel artifacts
         uses: actions/upload-artifact@v4
@@ -129,16 +133,36 @@ jobs:
           Flash: unpack Image.gz into boot.img with scripts/repack-boot.py, then
           \`fastboot flash boot boot-new.img\`. dtbo/vendor_boot stay untouched."
 
-      - name: Keep the build log on failure
+      # Artifact download and the job-log API both need an authenticated
+      # request, so a failing run is otherwise a black box. Commit the tail of
+      # the log instead: anyone can read it from the repo.
+      - name: Publish failure log into the repo
         if: failure()
+        shell: bash
         run: |
-          mkdir -p build-log
-          cp kout/.config build-log/kernel.config 2>/dev/null || true
-          echo "build failed - see the 'Build' step log above" > build-log/README.txt
+          set -uo pipefail
+          [ -f build-log.txt ] || echo "no build log captured" > build-log.txt
+          mkdir -p logs
+          {
+            echo "# build-kernel failure - run ${{ github.run_number }}"
+            echo
+            echo "trigger: ${{ github.event_name }}, commit: ${{ github.sha }}"
+            echo
+            echo '```'
+            tail -c 150000 build-log.txt
+            echo '```'
+          } > logs/last-failure.md
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add logs/last-failure.md
+          git commit -q -m "ci: failure log from run ${{ github.run_number }}" || exit 0
+          git push origin HEAD:main || true
 
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
           name: kernel-log-${{ github.run_number }}
-          path: build-log/
+          path: |
+            build-log.txt
+            kout/.config
           retention-days: 7
