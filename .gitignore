@@ -4,3 +4,6 @@ images/
 build-log/
 available.txt
 .DS_Store
+__pycache__/
+*.pyc
+kout/
