@@ -1,0 +1,117 @@
+name: extract-boot
+
+# The crDroid 17.0 OTA zip for nabu is payload-based: it contains payload.bin and
+# no IMAGES/ directory. Run #39804918860 confirmed it —
+#   payload.bin  1524586395 bytes, and nothing else that looks like a boot image.
+#
+# So boot.img (which is where recovery lives on this device, TARGET_NO_RECOVERY)
+# has to be pulled out of payload.bin. Doing that here means the phone-side
+# workflow never needs a dumper installed locally: flash boot.img to get
+# recovery, then sideload the big zip whenever it finishes downloading.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag that holds the OTA zip'
+        required: true
+        type: string
+        default: 'nabu-17.0-20261021'
+      wanted:
+        description: 'Partitions to extract, comma separated'
+        required: true
+        type: string
+        default: 'boot,vendor_boot,dtbo,vbmeta'
+
+permissions:
+  contents: write
+
+env:
+  PDG_VERSION: '2.1.0'
+
+jobs:
+  extract:
+    name: pull images out of payload.bin
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch the zip from our own release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.inputs.tag }}
+        run: |
+          set -eu
+          gh release download "$TAG" --pattern '*.zip' --repo "$GITHUB_REPOSITORY"
+          ls -lh *.zip
+
+      - name: Get payload-dumper-go
+        shell: bash
+        run: |
+          set -eu
+          BASE="https://github.com/ssut/payload-dumper-go/releases/download/${PDG_VERSION}"
+          curl -fsSL -o pdg.tar.gz "$BASE/payload-dumper-go_${PDG_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL -o pdg.sums   "$BASE/payload-dumper-go_sha256checksums.txt"
+          # verify the tarball before running it
+          grep "linux_amd64.tar.gz" pdg.sums | grep -v avx2 \
+            | awk '{print $1"  pdg.tar.gz"}' | sha256sum -c -
+          tar xzf pdg.tar.gz
+          chmod +x payload-dumper-go
+          command -v xz || sudo apt-get install -y xz-utils
+          ./payload-dumper-go -l *.zip | tee parts.txt
+
+      - name: Extract
+        shell: bash
+        env:
+          WANTED: ${{ github.event.inputs.wanted }}
+        run: |
+          set -eu
+          # only ask for partitions that actually exist in this payload
+          LIST=""
+          for p in $(echo "$WANTED" | tr ',' ' '); do
+            if grep -qw "$p" parts.txt; then
+              LIST="${LIST:+$LIST,}$p"
+            else
+              echo "::warning::partition '$p' is not in this payload, skipping"
+            fi
+          done
+          [ -n "$LIST" ] || { echo "::error::none of the wanted partitions exist"; exit 1; }
+          echo "extracting: $LIST"
+          mkdir -p out
+          ./payload-dumper-go -o out -p "$LIST" *.zip
+          echo "--- result ---"
+          ls -lh out/
+          for f in out/*.img; do
+            [ -f "$f" ] && shasum -a 256 "$f" || sha256sum "$f"
+          done
+
+      - name: Publish as release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.inputs.tag }}
+        run: |
+          set -eu
+          for f in out/*.img; do
+            [ -f "$f" ] || continue
+            echo "uploading $(basename "$f")"
+            gh release upload "$TAG" "$f" --clobber --repo "$GITHUB_REPOSITORY"
+          done
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets \
+            --jq '.assets[] | "\(.name)\t\(.size)\t\(.digest)"'
+
+      - name: Summary
+        shell: bash
+        run: |
+          {
+            echo "### boot images extracted from payload.bin"
+            echo
+            echo "| file | bytes |"
+            echo "|---|---|"
+            for f in out/*.img; do
+              [ -f "$f" ] && echo "| \`$(basename "$f")\` | $(wc -c < "$f" | tr -d ' ') |"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
