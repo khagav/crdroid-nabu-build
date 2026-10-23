@@ -196,10 +196,42 @@ Droidspaces 的 `Documentation/Kernel-Configuration.md` 对 non-GKI（3.18–4.1
 
 | 步骤 | 内容 | 状态 |
 |---|---|---|
-| Step 1 | 61 条 config 选项 | ✅ 58 条生效；`CFS_BANDWIDTH`、`FW_LOADER_COMPRESS` 这棵树没有该符号（文档说缺了只警告）；`NETFILTER_XT_TARGET_MASQUERADE`、`NF_CONNTRACK_NETLINK` 在 4.14 叫 `IP_NF_TARGET_MASQUERADE` / `NF_CT_NETLINK`，均已 `=y` |
+| Step 1 | 61 条 config 选项 | ✅ 58 条生效；`FW_LOADER_COMPRESS` 这棵树没有该符号；`CFS_BANDWIDTH` 被 Qualcomm 的 `SCHED_WALT` 挡掉（见下）；`NETFILTER_XT_TARGET_MASQUERADE`、`NF_CONNTRACK_NETLINK` 在 4.14 叫 `IP_NF_TARGET_MASQUERADE` / `NF_CT_NETLINK`，均已 `=y` |
 | Step 2 | UFW / Fail2ban 的 xtables 选项（可选） | ⏭ 跳过，核心容器功能不需要 |
 | Step 3 | `kernel-patches/non-GKI/` 全部补丁 | ✅ 补丁 02 已套；补丁 01 的 `xt_qtaguid.c` 在这棵树不存在，记录为 N/A |
-| Step 4 | 刷完在 App 里 Check Requirements | ⏳ 待刷机后 |
+| Step 4 | 刷完在 App 里 Check Requirements | ✅ 全绿（但 `CPU limit support` 那条是假阳性，见下） |
+
+### CPU 限流（`--cpus`）为什么用不了
+
+App 的 `Check Requirements` 会给 `CPU limit support` 打 ✓，**这是误报**，实测：
+
+| 检查 | 结果 |
+|---|---|
+| `zcat /proc/config.gz \| grep BANDWIDTH` | 一条都没有 |
+| `/dev/cpuctl/`（v1 cpu 控制器） | 只有 `cpu.shares`，**没有** `cpu.cfs_quota_us` / `cpu.cfs_period_us` |
+| `/sys/fs/cgroup/`（v2） | `cgroup.controllers` 只有 `memory pids`，没有 `cpu` |
+
+根因在 `init/Kconfig`：
+
+```kconfig
+config CFS_BANDWIDTH
+	bool "CPU bandwidth provisioning for FAIR_GROUP_SCHED"
+	depends on FAIR_GROUP_SCHED
+	depends on !SCHED_WALT      # <-- 这里
+```
+
+Qualcomm 打开了 `CONFIG_SCHED_WALT=y`（还有 `SCHED_TUNE`），`!SCHED_WALT` 不成立，符号在 `.config` 里**根本不出现**（不是 `# ... is not set`）。App 的判断逻辑大概是「grep 不到显式关闭 → 算通过」，于是误报。
+
+**能用的限制**（实测已确认）：
+
+| 限制 | 状态 | 证据 |
+|---|---|---|
+| `--memory` | ✅ | `cgroup.controllers` 含 `memory`，建子组后出现 `memory.max` / `memory.swap.max` |
+| `--pids-limit` | ✅ | 同上，`pids.max` / `pids.current` 出现 |
+| CPU 核数（cpuset） | ✅ | `/dev/cpuset/cpus` = `0-7`，v1 cpuset 控制器已挂载 |
+| `--cpus`（百分比限流） | ❌ | 需要 `CFS_BANDWIDTH`，被 WALT 挡住 |
+
+要真的拿到 `--cpus`，唯一办法是关掉 `SCHED_WALT` 重编内核——那是 Qualcomm 的核心调度器，关了等于换一套调度行为，性能与省电调优全跟着变。为一条 `--cpus` 付这个代价不值。想限制 CPU 就用 cpuset 钉核。
 
 ### 三个必须一致的东西
 
