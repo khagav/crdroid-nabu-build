@@ -46,6 +46,9 @@ log "kernel commit: $KSRC_COMMIT (branch $KSRC_BRANCH)"
 if [ -d "$KSRC_DIR/.git" ] && git -C "$KSRC_DIR" cat-file -e "${KSRC_COMMIT}^{commit}" 2>/dev/null; then
     log "reusing cached checkout"
     git -C "$KSRC_DIR" checkout -q --detach "$KSRC_COMMIT"
+    # drop anything a previous run left behind (applied patches, build files)
+    git -C "$KSRC_DIR" reset -q --hard "$KSRC_COMMIT"
+    git -C "$KSRC_DIR" clean -q -fdx -e .scmversion
 else
     rm -rf "$KSRC_DIR"
     mkdir -p "$KSRC_DIR"
@@ -153,6 +156,30 @@ log "verifying merged config"
 bash "$WORKSPACE/scripts/verify-kernel-config.sh" --config "$OUT/.config" || \
     die "required kernel options missing - refusing to build a kernel that claims Droidspaces support"
 
+# -------------------------------------------------------- 4b. Droidspaces patches
+# Upstream Droidspaces documents FOUR steps for non-GKI kernels, and step 3 is
+# "apply every patch under kernel-patches/non-GKI". Config alone is not enough.
+PATCH_DIR="$WORKSPACE/kernel/patches/non-GKI"
+PATCHED=0
+if [ -d "$PATCH_DIR" ]; then
+    for p in "$PATCH_DIR"/*.patch; do
+        [ -e "$p" ] || continue
+        name=$(basename "$p")
+        log "patch: $name"
+        if patch -p1 --forward --batch --fuzz=3 --dry-run < "$p" >/dev/null 2>&1; then
+            patch -p1 --forward --batch --fuzz=3 < "$p" >/dev/null
+            log "  applied"
+            PATCHED=$((PATCHED + 1))
+        elif patch -p1 -R --dry-run --batch --fuzz=3 < "$p" >/dev/null 2>&1; then
+            log "  already applied"
+            PATCHED=$((PATCHED + 1))
+        else
+            die "patch does not apply and is not already applied: $name"
+        fi
+    done
+fi
+log "patches applied: $PATCHED"
+
 # ----------------------------------------------------------------- 5. build
 MAKE=(make O="$OUT" ARCH=arm64 -j"$JOBS"
       CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu-
@@ -193,6 +220,7 @@ fi
     echo "kernel=$(make -s O="$OUT" ARCH=arm64 kernelrelease 2>/dev/null || echo unknown)"
     echo "droidspaces=$DROIDSPACES"
     echo "lto=$LTO"
+    echo "patches=$PATCHED"
     echo "clang=$(clang --version | head -1)"
     echo "imagegz_bytes=$(wc -c < "$ART/Image.gz" | tr -d ' ')"
     echo "imagegz_sha256=$(sha256sum "$ART/Image.gz" | cut -d' ' -f1)"

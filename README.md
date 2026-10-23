@@ -190,6 +190,17 @@ fastboot flash boot boot.img        # 原厂那份
 
 **不要**碰 `vendor_boot` / `dtbo`：前者是 Magisk 的 ramdisk 宿主，后者装 dtb（这个 boot.img 里没有 FDT，已核实）。
 
+### 上游文档的四步，逐条对账
+
+Droidspaces 的 `Documentation/Kernel-Configuration.md` 对 non-GKI（3.18–4.19）要求四步。第一版只做了 Step 1，复核时发现 **Step 3 的补丁漏了**，已补进构建流程。
+
+| 步骤 | 内容 | 状态 |
+|---|---|---|
+| Step 1 | 61 条 config 选项 | ✅ 58 条生效；`CFS_BANDWIDTH`、`FW_LOADER_COMPRESS` 这棵树没有该符号（文档说缺了只警告）；`NETFILTER_XT_TARGET_MASQUERADE`、`NF_CONNTRACK_NETLINK` 在 4.14 叫 `IP_NF_TARGET_MASQUERADE` / `NF_CT_NETLINK`，均已 `=y` |
+| Step 2 | UFW / Fail2ban 的 xtables 选项（可选） | ⏭ 跳过，核心容器功能不需要 |
+| Step 3 | `kernel-patches/non-GKI/` 全部补丁 | ✅ 补丁 02 已套；补丁 01 的 `xt_qtaguid.c` 在这棵树不存在，记录为 N/A |
+| Step 4 | 刷完在 App 里 Check Requirements | ⏳ 待刷机后 |
+
 ### 三个必须一致的东西
 
 换内核而不换 ROM，只有三处会对不上，都已经钉住了：
