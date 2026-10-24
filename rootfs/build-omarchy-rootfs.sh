@@ -94,15 +94,20 @@ mount_pseudo() {
 # Everything else in this build is downloaded by curl on the host. So resolve
 # those three on the host and seed the chroot's /etc/hosts, which makes the
 # resolver irrelevant.
+# IPv4 only, on purpose: the runner has no IPv6 route, and getent happily
+# returns AAAA records first, which then fail to connect. gethostbyname() is
+# IPv4-only by definition, so it is tried before getent.
 resolve_host() {
     local host=$1 ip=""
-    ip=$(getent hosts "$host" 2>/dev/null | awk '{print $1}' | head -1)
-    if [ -z "$ip" ] && command -v python3 >/dev/null 2>&1; then
+    if command -v python3 >/dev/null 2>&1; then
         ip=$(python3 -c 'import socket,sys
 try:
     print(socket.gethostbyname(sys.argv[1]))
 except Exception:
     pass' "$host" 2>/dev/null)
+    fi
+    if [ -z "$ip" ]; then
+        ip=$(getent ahostsv4 "$host" 2>/dev/null | awk '{print $1}' | sort -u | head -1)
     fi
     [ -n "$ip" ] && printf '%s\n' "$ip"
 }
