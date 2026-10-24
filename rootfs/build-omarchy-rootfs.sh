@@ -74,22 +74,48 @@ mount_pseudo() {
     mkdir -p "$ROOTFS"/{proc,sys,dev,dev/pts,tmp,run,etc/pacman.d}
     # the official image does not ship an mtab, and pacman needs one
     [ -e "$ROOTFS/etc/mtab" ] || ln -sf /proc/self/mounts "$ROOTFS/etc/mtab"
-
-    # The runner's /etc/resolv.conf points at the systemd-resolved stub on
-    # 127.0.0.53, which the chroot cannot reach: every download then fails with
-    # "Could not resolve host". Swap in public resolvers for the build only.
-    if grep -qE '^[[:space:]]*nameserver[[:space:]]+127\.' /etc/resolv.conf; then
-        log "host resolv.conf uses a loopback stub - using 1.1.1.1 / 8.8.8.8"
-        printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' > "$ROOTFS/etc/resolv.conf"
-    else
-        cp /etc/resolv.conf "$ROOTFS/etc/resolv.conf"
-    fi
     printf '127.0.0.1\tlocalhost\n::1\tlocalhost\n' > "$ROOTFS/etc/hosts"
-
+    # glibc falls back to a compiled-in default when this is missing, which on
+    # recent versions does not include DNS.
+    [ -e "$ROOTFS/etc/nsswitch.conf" ] || \
+        printf 'hosts: files dns\n' > "$ROOTFS/etc/nsswitch.conf"
     mount -t proc  proc  "$ROOTFS/proc"
     mount -t sysfs sysfs "$ROOTFS/sys"
     mount --bind /dev      "$ROOTFS/dev"
     mount --bind /dev/pts  "$ROOTFS/dev/pts"
+}
+
+# DNS inside the chroot is the one thing that reliably breaks: the runner's
+# /etc/resolv.conf points at the systemd-resolved stub on 127.0.0.53, which is
+# only reachable if resolved is actually running, and cloud runners often only
+# allow the platform resolver outbound on 53. Rather than guess, try each
+# candidate and keep the first one that resolves, so a failure names the cause.
+setup_dns() {
+    local candidates=() f ns probe
+    for f in /run/systemd/resolve/resolv.conf \
+             /run/systemd/resolve/netplan-resolv.conf \
+             /etc/resolv.conf; do
+        [ -r "$f" ] || continue
+        while read -r ns; do
+            [ -n "$ns" ] && candidates+=("$ns")
+        done < <(grep -E '^[[:space:]]*nameserver[[:space:]]' "$f" | awk '{print $2}')
+    done
+    candidates+=(168.63.129.16 1.1.1.1 8.8.8.8 8.8.4.4 9.9.9.9)
+
+    printf '%s\n' "host /etc/resolv.conf:" \
+                  "$(cat /etc/resolv.conf 2>/dev/null || echo '(none)')" \
+                  "/run/systemd/resolve/resolv.conf:" \
+                  "$(cat /run/systemd/resolve/resolv.conf 2>/dev/null || echo '(none)')" \
+                  "candidates: ${candidates[*]:-none}"
+
+    for probe in "${candidates[@]}"; do
+        printf 'nameserver %s\n' "$probe" > "$ROOTFS/etc/resolv.conf"
+        if in_rootfs getent hosts pkgs.omarchy.org >/dev/null 2>&1; then
+            log "chroot DNS resolves via $probe"
+            return 0
+        fi
+    done
+    return 1
 }
 
 unmount_pseudo() {
@@ -191,6 +217,8 @@ if [ "$CHANNEL" != "stable" ]; then
 fi
 
 mount_pseudo
+
+setup_dns || die "no working DNS inside the chroot - see the diagnostics above"
 
 # ------------------------------------------------------------------ 3. upgrade
 if [ "${SKIP_UPGRADE:-0}" = "1" ]; then
