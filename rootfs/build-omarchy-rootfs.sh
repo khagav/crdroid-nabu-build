@@ -85,37 +85,46 @@ mount_pseudo() {
     mount --bind /dev/pts  "$ROOTFS/dev/pts"
 }
 
-# DNS inside the chroot is the one thing that reliably breaks: the runner's
-# /etc/resolv.conf points at the systemd-resolved stub on 127.0.0.53, which is
-# only reachable if resolved is actually running, and cloud runners often only
-# allow the platform resolver outbound on 53. Rather than guess, try each
-# candidate and keep the first one that resolves, so a failure names the cause.
+# DNS inside the chroot is the one thing that reliably breaks. The runner's
+# /etc/resolv.conf points at the systemd-resolved stub on 127.0.0.53, and even
+# the real uplink from /run/systemd/resolve/resolv.conf (168.63.129.16) did not
+# answer from inside the chroot, while the host resolved everything fine.
+#
+# Rather than fight it, note what pacman actually needs: three repo hostnames.
+# Everything else in this build is downloaded by curl on the host. So resolve
+# those three on the host and seed the chroot's /etc/hosts, which makes the
+# resolver irrelevant.
+resolve_host() {
+    local host=$1 ip=""
+    ip=$(getent hosts "$host" 2>/dev/null | awk '{print $1}' | head -1)
+    if [ -z "$ip" ] && command -v python3 >/dev/null 2>&1; then
+        ip=$(python3 -c 'import socket,sys
+try:
+    print(socket.gethostbyname(sys.argv[1]))
+except Exception:
+    pass' "$host" 2>/dev/null)
+    fi
+    [ -n "$ip" ] && printf '%s\n' "$ip"
+}
+
 setup_dns() {
-    local candidates=() f ns probe
-    for f in /run/systemd/resolve/resolv.conf \
-             /run/systemd/resolve/netplan-resolv.conf \
-             /etc/resolv.conf; do
-        [ -r "$f" ] || continue
-        while read -r ns; do
-            [ -n "$ns" ] && candidates+=("$ns")
-        done < <(grep -E '^[[:space:]]*nameserver[[:space:]]' "$f" | awk '{print $2}')
-    done
-    candidates+=(168.63.129.16 1.1.1.1 8.8.8.8 8.8.4.4 9.9.9.9)
-
-    printf '%s\n' "host /etc/resolv.conf:" \
-                  "$(cat /etc/resolv.conf 2>/dev/null || echo '(none)')" \
-                  "/run/systemd/resolve/resolv.conf:" \
-                  "$(cat /run/systemd/resolve/resolv.conf 2>/dev/null || echo '(none)')" \
-                  "candidates: ${candidates[*]:-none}"
-
-    for probe in "${candidates[@]}"; do
-        printf 'nameserver %s\n' "$probe" > "$ROOTFS/etc/resolv.conf"
-        if in_rootfs getent hosts pkgs.omarchy.org >/dev/null 2>&1; then
-            log "chroot DNS resolves via $probe"
-            return 0
+    local hosts="pkgs.omarchy.org arm-stable-mirror.omarchy.org ca.us.mirror.archlinuxarm.org"
+    local h ip found=0
+    printf '127.0.0.1\tlocalhost\n::1\tlocalhost\n' > "$ROOTFS/etc/hosts"
+    # keep a resolver configured too, in case anything looks one up directly
+    printf 'nameserver 168.63.129.16\nnameserver 1.1.1.1\n' > "$ROOTFS/etc/resolv.conf"
+    for h in $hosts; do
+        ip=$(resolve_host "$h")
+        if [ -n "$ip" ]; then
+            printf '%s\t%s\n' "$ip" "$h" >> "$ROOTFS/etc/hosts"
+            log "resolved $h -> $ip"
+            found=$((found + 1))
+        else
+            log "WARNING: could not resolve $h on the host"
         fi
     done
-    return 1
+    [ "$found" -ge 2 ] || die "host resolved only $found of the repo hostnames"
+    log "seeded the chroot /etc/hosts with $found repo hostnames"
 }
 
 unmount_pseudo() {
@@ -378,6 +387,10 @@ MESA_VERSION=$(in_rootfs pacman -Q mesa 2>/dev/null || echo "unknown")
 KERNEL_HINT=$(in_rootfs pacman -Q linux-aarch64 2>/dev/null || echo "no kernel package (expected: the Android kernel is the host)")
 
 log "cleaning up"
+# /etc/hosts carried the CI runner's resolved IPs; the container must resolve
+# for itself.
+printf '127.0.0.1\tlocalhost\n::1\tlocalhost\n' > "$ROOTFS/etc/hosts"
+printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' > "$ROOTFS/etc/resolv.conf"
 rm -rf "$ROOTFS"/tmp/* "$ROOTFS"/var/cache/pacman/pkg/* "$ROOTFS"/var/lib/pacman/sync/*
 unmount_pseudo
 
