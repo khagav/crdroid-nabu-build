@@ -71,7 +71,7 @@ in_rootfs() {
 }
 
 mount_pseudo() {
-    mkdir -p "$ROOTFS"/{proc,sys,dev,dev/pts,tmp,run,etc/pacman.d}
+    mkdir -p "$ROOTFS"/{proc,sys,dev,dev/pts,tmp,run,etc/pacman.d,var/cache/pacman/pkg}
     # the official image does not ship an mtab, and pacman needs one
     [ -e "$ROOTFS/etc/mtab" ] || ln -sf /proc/self/mounts "$ROOTFS/etc/mtab"
     printf '127.0.0.1\tlocalhost\n::1\tlocalhost\n' > "$ROOTFS/etc/hosts"
@@ -207,8 +207,11 @@ SigLevel = Never
 LocalFileSigLevel = Never
 Color
 ParallelDownloads = 5
-CheckSpace
 VerbosePkgLists
+# CheckSpace is deliberately absent. In a chroot it cannot determine the mount
+# point of the cachedir (/proc/self/mounts lists host paths, so nothing matches
+# the chroot's own tree) and every transaction then fails with "could not
+# determine cachedir mount point / could not determine free space".
 
 [omarchy]
 Server = https://pkgs.omarchy.org/stable/$arch
