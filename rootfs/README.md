@@ -15,8 +15,15 @@ workflow's Release.
 | `mesa-for-android-container` | 26.3.0-devel | Adreno kgsl driver |
 | `systemd` | 257.9-2 | last release known to boot on the 4.14 kernel this tablet runs. Held via `IgnorePkg` |
 
-Held packages are written to `/etc/pacman.conf` as `IgnorePkg`, so a later
-`pacman -Syu` inside the container will not quietly undo them.
+Held packages are written to `/etc/pacman.conf` as `IgnorePkg` (in `[options]`,
+where it is actually parsed), so a later `pacman -Syu` inside the container will
+not quietly undo them.
+
+`/usr/bin/mkinitcpio` is a **build-time stub** that prints a message and exits 0.
+The container has no bootloader entry and no initramfs to build, and Omarchy's
+mkinitcpio drop-in references a `btrfs-overlayfs` hook that does not exist here,
+so a real run always fails. Reinstall the `mkinitcpio` package to get the real
+binary back.
 
 ## Import
 
@@ -75,6 +82,8 @@ passwd
   has no seat for a display manager.
 - Anything Omarchy drives through the host: `plymouth`, `limine`, UKI, btrfs
   snapshots, firmware extraction.
+- A kernel or initramfs built inside the container — see the mkinitcpio stub
+  above. The Android kernel is the host and boots the tablet.
 
 ## Rebuild
 

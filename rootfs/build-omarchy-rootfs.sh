@@ -138,6 +138,56 @@ unmount_pseudo() {
     done
 }
 
+# ------------------------------------------------------------------- holds
+# IgnorePkg is an [options] directive. Appending it to the end of pacman.conf
+# puts it inside the last repo section, where pacman does not recognise it -
+# it only prints a warning and keeps going, so the hold silently does nothing.
+# (That is exactly what happened on the first run that got this far.)
+IGNORE_PKGS=""
+hold_pkgs() {
+    local p
+    for p in "$@"; do
+        case " $IGNORE_PKGS " in
+            *" $p "*) ;;
+            *) IGNORE_PKGS="${IGNORE_PKGS:+$IGNORE_PKGS }$p" ;;
+        esac
+    done
+    if grep -q '^IgnorePkg[[:space:]]*=' "$ROOTFS/etc/pacman.conf"; then
+        sed -i "s|^IgnorePkg[[:space:]]*=.*|IgnorePkg = $IGNORE_PKGS|" "$ROOTFS/etc/pacman.conf"
+    else
+        sed -i "/^\[options\]/a IgnorePkg = $IGNORE_PKGS" "$ROOTFS/etc/pacman.conf"
+    fi
+    log "held: $IGNORE_PKGS"
+}
+
+# ------------------------------------------------------------------- mkinitcpio
+# This rootfs is imported into Droidspaces: Android's own kernel and boot chain
+# start the container, there is no bootloader entry and nothing that could load
+# an initramfs. Meanwhile omarchy ships an mkinitcpio drop-in whose hook list
+# references hooks (btrfs-overlayfs) that are not part of this container, so a
+# real mkinitcpio run fails and prints "error: command failed to execute
+# correctly" in the middle of the omarchy transaction.
+# Replace it with a no-op. Deliberately written over /usr/bin/mkinitcpio rather
+# than /usr/local/sbin, because the alpm hook calls it by absolute path.
+# If a package upgrade re-extracts the real binary during a transaction, call
+# this again afterwards.
+install_mkinitcpio_stub() {
+    cat > "$ROOTFS/usr/bin/mkinitcpio" <<'STUB'
+#!/bin/sh
+# Build-time stub installed by build-omarchy-rootfs.sh.
+#
+# This rootfs runs inside Droidspaces on Android: the Android kernel and boot
+# chain are the host, there is no bootloader entry and no initramfs to build.
+# The hook list shipped by omarchy also references hooks (btrfs-overlayfs) that
+# do not exist here, so a real mkinitcpio run always fails.
+#
+# To get real initramfs generation back, reinstall the mkinitcpio package.
+echo "mkinitcpio: skipped, this is a container rootfs booted by Android" >&2
+exit 0
+STUB
+    chmod 0755 "$ROOTFS/usr/bin/mkinitcpio"
+}
+
 cleanup() { unmount_pseudo 2>/dev/null || true; }
 trap cleanup EXIT
 
@@ -272,19 +322,25 @@ in_rootfs pacman -Q hyprland-anland || die "hyprland-anland did not install"
 # xorg-xwayland from this release is version 0.0.0.r19533, lower than the repo
 # package on purpose. Hold it now, before omarchy's dependency pass, or pacman
 # will replace the Anland build with the stock one.
-log "holding the Anland xorg-xwayland"
-cat >> "$ROOTFS/etc/pacman.conf" <<'HOLD1'
-
-IgnorePkg = hyprland-anland hyprpm-anland xorg-xwayland
-HOLD1
+log "holding the Anland packages"
+hold_pkgs hyprland-anland hyprpm-anland xorg-xwayland
 
 # ------------------------------------------------------------------ 5. omarchy
 log "installing omarchy from pkgs.omarchy.org ($CHANNEL)"
-in_rootfs pacman -S --noconfirm --needed omarchy
+install_mkinitcpio_stub
+# A failing install scriptlet makes pacman exit non-zero without rolling
+# anything back, which is cosmetic for this rootfs. Warn and let the
+# verification below decide whether the transaction actually happened.
+in_rootfs pacman -S --noconfirm --needed omarchy || \
+    warn "pacman reported a failure during the omarchy install (see above)"
+# a package upgrade inside that transaction may have re-extracted the real
+# mkinitcpio over the stub
+install_mkinitcpio_stub
 in_rootfs pacman -Q omarchy || die "omarchy did not install"
-# hyprland-anland provides hyprland and conflicts with it, so the stock
-# compositor must not be present.
-if in_rootfs pacman -Q hyprland >/dev/null 2>&1; then
+# hyprland-anland PROVIDES hyprland, so `pacman -Q hyprland` succeeds even when
+# only the Anland build is present - it resolves the name through the provides
+# list. Compare against installed package names instead.
+if in_rootfs pacman -Qq | grep -qx hyprland; then
     die "stock hyprland got installed alongside hyprland-anland"
 fi
 
@@ -298,14 +354,22 @@ in_rootfs pacman -U --noconfirm \
     /tmp/sd257/systemd-257*.pkg.tar.xz \
     /tmp/sd257/systemd-libs-257*.pkg.tar.xz \
     /tmp/sd257/systemd-sysvcompat-257*.pkg.tar.xz \
-    /tmp/sd257/systemd-resolvconf-257*.pkg.tar.xz
+    /tmp/sd257/systemd-resolvconf-257*.pkg.tar.xz || {
+    # ALARM packages built after the 262 release can carry an exact-version
+    # dependency on it. Everything here is pinned to 257 afterwards anyway, so
+    # skipping the checks is the smaller risk.
+    warn "systemd downgrade refused the dependency check, retrying with --nodeps"
+    in_rootfs pacman -U --noconfirm --nodeps \
+        /tmp/sd257/systemd-257*.pkg.tar.xz \
+        /tmp/sd257/systemd-libs-257*.pkg.tar.xz \
+        /tmp/sd257/systemd-sysvcompat-257*.pkg.tar.xz \
+        /tmp/sd257/systemd-resolvconf-257*.pkg.tar.xz
+}
 in_rootfs systemctl --version | head -1
+in_rootfs pacman -Q systemd | grep -q '257\.' || die "systemd is not at 257"
 
 log "holding systemd at 257"
-cat >> "$ROOTFS/etc/pacman.conf" <<'HOLD2'
-
-IgnorePkg = systemd systemd-libs systemd-sysvcompat systemd-resolvconf
-HOLD2
+hold_pkgs systemd systemd-libs systemd-sysvcompat systemd-resolvconf
 
 # ------------------------------------------------------------------ 7. mesa
 log "installing mesa for Android containers (kgsl)"
@@ -360,8 +424,12 @@ FD_DEV_FEATURES=enable_tp_ubwc_flag_hint=1
 ENVFILE
 
 # sddm is a hard dependency of omarchy but has nothing to attach to in a
-# container; mask it so it can never start and steal the session.
+# container; mask it so it can never start and steal the session. systemctl mask
+# is what omarchy's own hooks use, but the direct symlink is what it actually
+# does and does not depend on systemctl deciding it is running in a chroot.
 log "masking sddm (omarchy dependency, unusable in a container)"
+mkdir -p "$ROOTFS/etc/systemd/system"
+ln -sf /dev/null "$ROOTFS/etc/systemd/system/sddm.service"
 in_rootfs systemctl mask sddm.service || true
 
 # Session unit is installed but left disabled: without the Anland daemon
