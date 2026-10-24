@@ -1,9 +1,15 @@
 # Omarchy rootfs build failure
 
-run: https://github.com/khagav/crdroid-nabu-build/actions/runs/40049666262
+run: https://github.com/khagav/crdroid-nabu-build/actions/runs/40051872469
 
 ```
-of-capture-51.0-1-aarch64 downloading...
+.15.1-1-aarch64 downloading...
+ zlib-1:1.3.2-4-aarch64 downloading...
+ mkinitcpio-42.2-1-any downloading...
+ libcap-ng-0.9.6-1-aarch64 downloading...
+ libnftnl-1.3.2-1-aarch64 downloading...
+ libffi-3.8.0-1-aarch64 downloading...
+ libsysprof-capture-51.0-1-aarch64 downloading...
  linux-firmware-whence-20260916-1-any downloading...
  systemd-sysvcompat-262.1-1-aarch64 downloading...
  libmakepkg-dropins-20-2-any downloading...
@@ -159,7 +165,7 @@ upgrading vim...
 (15/15) Reloading system bus configuration...
   Skipped: Running in chroot.
 
-== 01:26:04  installing the build essentials (sudo, base-devel)
+== 01:55:42  installing the build essentials (sudo, base-devel)
 resolving dependencies...
 looking for conflicting packages...
 
@@ -297,13 +303,13 @@ installing base-devel...
 (4/5) Checking for old perl modules...
 (5/5) Updating the info directory file...
 
-== 01:26:15  installing the Anland-patched compositor
+== 01:55:51  installing the Anland-patched compositor
   % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
                                  Dload  Upload   Total   Spent    Left  Speed
   0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
- 37 49.0M   37 18.3M    0     0  66.6M      0 --:--:-- --:--:-- --:--:-- 66.6M100 49.0M  100 49.0M    0     0   116M      0 --:--:-- --:--:-- --:--:--  208M
+  0 49.0M    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0100 49.0M  100 49.0M    0     0   146M      0 --:--:-- --:--:-- --:--:--  300M
 
-== 01:26:15  anland packages: /tmp/payload/anland-hyprland-packages/arch/hyprland-anland-0.56.0.r52.gff672deb6-1-aarch64.pkg.tar.xz /tmp/payload/anland-hyprland-packages/arch/hyprpm-anland-0.56.0.r52.gff672deb6-1-aarch64.pkg.tar.xz /tmp/payload/anland-hyprland-packages/arch/xorg-xwayland-0.0.0.r19533.gecdaca33a-1-aarch64.pkg.tar.xz
+== 01:55:52  anland packages: /tmp/payload/anland-hyprland-packages/arch/hyprland-anland-0.56.0.r52.gff672deb6-1-aarch64.pkg.tar.xz /tmp/payload/anland-hyprland-packages/arch/hyprpm-anland-0.56.0.r52.gff672deb6-1-aarch64.pkg.tar.xz /tmp/payload/anland-hyprland-packages/arch/xorg-xwayland-0.0.0.r19533.gecdaca33a-1-aarch64.pkg.tar.xz
 loading packages...
 resolving dependencies...
 looking for conflicting packages...
@@ -768,10 +774,11 @@ Creating user 'git' (git daemon user) with UID 967 and GID 967.
 (8/8) Updating fontconfig cache...
 hyprland-anland 0.56.0.r52.gff672deb6-1
 
-== 01:26:31  holding the Anland xorg-xwayland
+== 01:56:05  holding the Anland packages
 
-== 01:26:31  installing omarchy from pkgs.omarchy.org (stable)
-warning: config file /etc/pacman.conf, line 28: directive 'IgnorePkg' in section 'alarm' not recognized.
+== 01:56:05  held: hyprland-anland hyprpm-anland xorg-xwayland
+
+== 01:56:05  installing omarchy from pkgs.omarchy.org (stable)
 resolving dependencies...
 :: There are 13 providers available for ttf-font:
 :: Repository omarchy
@@ -1258,35 +1265,7 @@ Creating user 'sddm' (SDDM Greeter Account) with UID 963 and GID 963.
   Skipped: Running in chroot.
 ( 7/17) Arming ConditionNeedsUpdate...
 ( 8/17) Updating linux initcpios...
-==> Building image from preset: /etc/mkinitcpio.d/linux-aarch64.preset: 'default'
-==> Using default configuration file: '/etc/mkinitcpio.conf'
-  -> -k 7.2.11-1-aarch64-ARCH -g /boot/initramfs-linux.img
-==> Using drop-in configuration file: 'omarchy_hooks.conf'
-==> Using drop-in configuration file: 'omarchy_vconsole.conf'
-==> Starting build: '7.2.11-1-aarch64-ARCH'
-  -> Running build hook: [base]
-  -> Running build hook: [udev]
-  -> Running build hook: [plymouth]
-  -> Running build hook: [keyboard]
-  -> Running build hook: [autodetect]
-==> ERROR: failed to detect root filesystem
-  -> Running build hook: [microcode]
-==> WARNING: architecture 'aarch64' not supported, skipping hook
-  -> Running build hook: [modconf]
-  -> Running build hook: [kms]
-==> WARNING: No module containing the symbol 'drm_privacy_screen_register' found in: 'drivers/platform'
-  -> Running build hook: [keymap]
-  -> Running build hook: [consolefont]
-==> WARNING: consolefont: no font found in configuration
-  -> Running build hook: [block]
-  -> Running build hook: [encrypt]
-  -> Running build hook: [filesystems]
-  -> Running build hook: [fsck]
-==> ERROR: Hook 'btrfs-overlayfs' cannot be found
-==> Generating module dependencies
-==> Creating gzip-compressed initcpio image: '/boot/initramfs-linux.img'
-==> WARNING: errors were encountered during the build. The image may not be complete.
-error: command failed to execute correctly
+mkinitcpio: skipped, this is a container rootfs booted by Android
 ( 9/17) Reloading Hyprland after Omarchy settings update...
 (10/17) Reloading system bus configuration...
   Skipped: Running in chroot.
@@ -1297,8 +1276,23 @@ error: command failed to execute correctly
 (15/17) Updating icon theme caches...
 (16/17) Querying Quickshell compatibility after Qt6 update...
 (17/17) Updating the desktop file MIME type cache...
-warning: config file /etc/pacman.conf, line 28: directive 'IgnorePkg' in section 'alarm' not recognized.
 omarchy 4.0.6-1
 
-!! FAILED: stock hyprland got installed alongside hyprland-anland
+== 01:56:19  downgrading systemd to 257.9-2 (4.14 kernel compatibility)
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
+ 88 13.6M   88 12.1M    0     0  52.1M      0 --:--:-- --:--:-- --:--:-- 52.1M100 13.6M  100 13.6M    0     0  56.8M      0 --:--:-- --:--:-- --:--:--  222M
+error: '/tmp/sd257/systemd-257*.pkg.tar.xz': could not find or read package
+error: '/tmp/sd257/systemd-libs-257*.pkg.tar.xz': could not find or read package
+error: '/tmp/sd257/systemd-sysvcompat-257*.pkg.tar.xz': could not find or read package
+error: '/tmp/sd257/systemd-resolvconf-257*.pkg.tar.xz': could not find or read package
+loading packages...
+
+!! systemd downgrade refused the dependency check, retrying with --nodeps
+error: '/tmp/sd257/systemd-257*.pkg.tar.xz': could not find or read package
+error: '/tmp/sd257/systemd-libs-257*.pkg.tar.xz': could not find or read package
+error: '/tmp/sd257/systemd-sysvcompat-257*.pkg.tar.xz': could not find or read package
+error: '/tmp/sd257/systemd-resolvconf-257*.pkg.tar.xz': could not find or read package
+loading packages...
 ```
