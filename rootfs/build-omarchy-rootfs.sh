@@ -258,9 +258,11 @@ curl -fL --retry 3 --retry-delay 5 -o "$CACHE/$ANLAND_ARCHIVE" \
     "https://github.com/$PKG_REPO/releases/download/$ANLAND_TAG/$ANLAND_ARCHIVE"
 rm -rf "$ROOTFS/tmp/payload"; mkdir -p "$ROOTFS/tmp/payload"
 tar -xf "$CACHE/$ANLAND_ARCHIVE" -C "$ROOTFS/tmp/payload"
-# pacman runs inside the chroot, so the package paths must be chroot-relative.
+# pacman runs inside the chroot, so package paths must be chroot-relative.
+# Strip the host prefix mechanically rather than rebuilding the path by hand.
 mapfile -t ANLAND_PKGS < <(
-    find "$ROOTFS/tmp/payload" -name '*.pkg.tar.*' -printf '/%P\n' | sort
+    find "$ROOTFS/tmp/payload" -name '*.pkg.tar.*' -printf '%p\n' |
+        sed "s|^$ROOTFS||" | sort
 )
 [ "${#ANLAND_PKGS[@]}" -gt 0 ] || die "no packages inside $ANLAND_ARCHIVE"
 log "anland packages: ${ANLAND_PKGS[*]}"
@@ -312,7 +314,8 @@ curl -fL --retry 3 --retry-delay 5 -o "$CACHE/$MESA_ARCHIVE" \
 mkdir -p "$ROOTFS/tmp/mesa"
 tar -xf "$CACHE/$MESA_ARCHIVE" -C "$ROOTFS/tmp/mesa"
 mapfile -t MESA_PKGS < <(
-    find "$ROOTFS/tmp/mesa" -name '*.pkg.tar.*' -printf '/%P\n' | sort
+    find "$ROOTFS/tmp/mesa" -name '*.pkg.tar.*' -printf '%p\n' |
+        sed "s|^$ROOTFS||" | sort
 )
 if [ "${#MESA_PKGS[@]}" -gt 0 ]; then
     log "mesa packages: ${MESA_PKGS[*]}"
