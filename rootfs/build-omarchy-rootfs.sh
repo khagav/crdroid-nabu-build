@@ -71,7 +71,9 @@ in_rootfs() {
 }
 
 mount_pseudo() {
-    mkdir -p "$ROOTFS"/{proc,sys,dev,dev/pts,tmp,run}
+    mkdir -p "$ROOTFS"/{proc,sys,dev,dev/pts,tmp,run,etc/pacman.d}
+    # the official image does not ship an mtab, and pacman needs one
+    [ -e "$ROOTFS/etc/mtab" ] || ln -sf /proc/self/mounts "$ROOTFS/etc/mtab"
     mount -t proc  proc  "$ROOTFS/proc"
     mount -t sysfs sysfs "$ROOTFS/sys"
     mount --bind /dev      "$ROOTFS/dev"
@@ -101,20 +103,40 @@ log "free space at $WORK: ${avail} GiB"
 
 # ------------------------------------------------------------------ 1. base rootfs
 log "staging base rootfs"
-if docker info >/dev/null 2>&1; then
-    log "using arm64v8/archlinux:latest via docker export (current userland)"
-    docker pull -q arm64v8/archlinux:latest >/dev/null
-    cid=$(docker create arm64v8/archlinux:latest)
+# arm64v8/* was retired on Docker Hub and now returns "pull access denied",
+# so try the official multi-arch image first and keep the old name as a
+# fallback. Both are verified to be aarch64 before use.
+BASE_IMAGE=""
+for candidate in archlinux:latest arm64v8/archlinux:latest; do
+    if docker pull -q "$candidate" >/dev/null 2>&1; then
+        BASE_IMAGE=$candidate
+        break
+    fi
+    log "pull failed: $candidate"
+done
+
+if [ -n "$BASE_IMAGE" ]; then
+    log "using $BASE_IMAGE via docker export"
+    cid=$(docker create "$BASE_IMAGE")
     docker export "$cid" | tar -xpf - -C "$ROOTFS"
     docker rm -f "$cid" >/dev/null
 else
-    warn "docker unavailable, falling back to the ALARM tarball (older userland)"
+    warn "no docker image available, falling back to the ALARM tarball"
     [ -f "$CACHE/alarm.tar.gz" ] || \
         curl -fL --retry 3 --retry-delay 5 -o "$CACHE/alarm.tar.gz" "$ALARM_URL"
     tar -xpf "$CACHE/alarm.tar.gz" -C "$ROOTFS"
 fi
+
 [ -x "$ROOTFS/usr/bin/pacman" ] || die "base rootfs has no pacman"
 [ -e "$ROOTFS/etc/pacman.conf" ] || die "base rootfs has no /etc/pacman.conf"
+
+# An arm64 runner pulls the arm64 image, but assert it rather than assume it:
+# an x86_64 base would fail much later, during pacman, with a confusing error.
+# ELF e_machine for AArch64 is 183.
+elf_machine=$(od -An -tu1 -j18 -N1 "$ROOTFS/usr/bin/pacman" 2>/dev/null | tr -d ' ')
+[ "$elf_machine" = "183" ] || \
+    die "base rootfs is not aarch64 (ELF e_machine=${elf_machine:-unknown})"
+log "base rootfs is aarch64"
 
 # ------------------------------------------------------------------ 2. pacman
 log "writing pacman.conf (repos: omarchy, core, extra, alarm)"
@@ -163,6 +185,10 @@ else
         in_rootfs pacman -Syu --noconfirm --overwrite '*'
     }
 fi
+
+log "installing the build essentials (sudo, base-devel)"
+# The official archlinux image is deliberately minimal and ships neither.
+in_rootfs pacman -S --noconfirm --needed base-devel sudo
 
 # ------------------------------------------------------------------ 4. anland
 log "installing the Anland-patched compositor"
