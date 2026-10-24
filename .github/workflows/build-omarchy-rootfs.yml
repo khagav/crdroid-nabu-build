@@ -1,0 +1,139 @@
+name: Build Omarchy rootfs
+
+# Builds a Droidspaces-ready Arch Linux ARM rootfs with Omarchy on top.
+#
+# Runs on GitHub's arm64 hosted runner, so the whole build is native aarch64:
+# no qemu-user, no binfmt. The runner image is Ubuntu 24.04 arm64, which is the
+# same class of machine the official Droidspaces rootfs builder uses.
+
+on:
+  workflow_dispatch:
+    inputs:
+      username:
+        description: Container user name
+        required: true
+        default: Gold
+        type: string
+      password:
+        description: Container user password
+        required: true
+        default: "1234"
+        type: string
+      channel:
+        description: Omarchy channel (stable, rc, edge)
+        required: true
+        default: stable
+        type: choice
+        options: [stable, rc, edge]
+      publish:
+        description: Create a GitHub Release with the result
+        required: true
+        default: true
+        type: boolean
+  push:
+    paths:
+      - "rootfs/**"
+      - ".github/workflows/build-omarchy-rootfs.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: omarchy-rootfs-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Arch ARM + Omarchy
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 150
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Report the host
+        run: |
+          uname -m
+          nproc
+          df -h /
+          docker info --format '{{.ServerVersion}}' || echo "docker unavailable"
+
+      - name: Free disk space
+        run: |
+          # The runner ships several toolchains this build never uses; the
+          # rootfs alone needs ~3 GiB and the tarball another ~1.5 GiB.
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune -af || true
+          df -h /
+
+      - name: Build rootfs
+        env:
+          IN_USERNAME: ${{ inputs.username }}
+          IN_PASSWORD: ${{ inputs.password }}
+          IN_CHANNEL: ${{ inputs.channel }}
+        run: |
+          set -euo pipefail
+          sudo env \
+            WORK="$GITHUB_WORKSPACE/work" \
+            USERNAME="${IN_USERNAME:-Gold}" \
+            PASSWORD="${IN_PASSWORD:-1234}" \
+            CHANNEL="${IN_CHANNEL:-stable}" \
+            ./rootfs/build-omarchy-rootfs.sh 2>&1 | tee build.log
+
+      - name: Show what was produced
+        if: always()
+        run: |
+          ls -lh work/dist/ 2>/dev/null || true
+          cat work/dist/build-info.txt 2>/dev/null || true
+
+      # Job logs and artifacts both need authentication to read, so a red run is
+      # otherwise invisible from outside. Put the tail in the repo instead.
+      - name: Record the failure in the repo
+        if: failure()
+        run: |
+          mkdir -p logs
+          {
+            echo "# Omarchy rootfs build failure"
+            echo
+            echo "run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo
+            echo '```'
+            tail -c 60000 build.log 2>/dev/null || echo "no build.log"
+            echo '```'
+          } > logs/last-failure.md
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add logs/last-failure.md
+          git commit -m "ci: record omarchy rootfs build failure [skip ci]" || true
+          git push || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: omarchy-rootfs-${{ github.run_number }}
+          path: |
+            work/dist/*.tar.xz
+            work/dist/*.sha256
+            work/dist/build-info.txt
+            work/dist/packages.txt
+          retention-days: 14
+
+      - name: Publish release
+        if: success() && (inputs.publish == null || inputs.publish)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: omarchy-rootfs-${{ github.run_number }}
+          name: Omarchy rootfs ${{ github.run_number }}
+          body: |
+            Arch Linux ARM + Omarchy ${{ inputs.channel || 'stable' }}, built on
+            an aarch64 runner.
+
+            Import the `.tar.xz` as a Droidspaces rootfs, then read
+            `rootfs/README.md` for the host-side steps (Anland daemon, bind
+            mount, session start).
+          files: |
+            work/dist/*.tar.xz
+            work/dist/*.sha256
+            work/dist/build-info.txt
+            work/dist/packages.txt
+          fail_on_unmatched_files: false
