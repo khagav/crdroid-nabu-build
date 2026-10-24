@@ -350,21 +350,30 @@ curl -fL --retry 3 --retry-delay 5 -o "$CACHE/$SYSTEMD_ARCHIVE" \
     "https://github.com/$PKG_REPO/releases/download/$SYSTEMD_TAG/$SYSTEMD_ARCHIVE"
 mkdir -p "$ROOTFS/tmp/sd257"
 tar -xzf "$CACHE/$SYSTEMD_ARCHIVE" -C "$ROOTFS/tmp/sd257"
-in_rootfs pacman -U --noconfirm \
-    /tmp/sd257/systemd-257*.pkg.tar.xz \
-    /tmp/sd257/systemd-libs-257*.pkg.tar.xz \
-    /tmp/sd257/systemd-sysvcompat-257*.pkg.tar.xz \
-    /tmp/sd257/systemd-resolvconf-257*.pkg.tar.xz || {
+# Resolve the paths on the host, then hand pacman chroot-relative ones. A glob
+# written directly into the in_rootfs call is expanded by the *host* shell,
+# where /tmp/sd257 does not exist, so pacman receives a literal '*' and fails
+# with "could not find or read package".
+mapfile -t SD_PKGS < <(
+    find "$ROOTFS/tmp/sd257" -maxdepth 1 \
+        \( -name 'systemd-257*.pkg.tar.*' \
+        -o -name 'systemd-libs-257*.pkg.tar.*' \
+        -o -name 'systemd-sysvcompat-257*.pkg.tar.*' \
+        -o -name 'systemd-resolvconf-257*.pkg.tar.*' \) \
+        -printf '%p\n' |
+        sed -e "s|^$ROOTFS||" -e 's|/\./|/|g' | sort
+)
+[ "${#SD_PKGS[@]}" -ge 4 ] || \
+    die "expected the four systemd 257 packages inside $SYSTEMD_ARCHIVE"
+log "systemd packages: ${SD_PKGS[*]}"
+if ! in_rootfs pacman -U --noconfirm "${SD_PKGS[@]}"; then
     # ALARM packages built after the 262 release can carry an exact-version
     # dependency on it. Everything here is pinned to 257 afterwards anyway, so
     # skipping the checks is the smaller risk.
     warn "systemd downgrade refused the dependency check, retrying with --nodeps"
-    in_rootfs pacman -U --noconfirm --nodeps \
-        /tmp/sd257/systemd-257*.pkg.tar.xz \
-        /tmp/sd257/systemd-libs-257*.pkg.tar.xz \
-        /tmp/sd257/systemd-sysvcompat-257*.pkg.tar.xz \
-        /tmp/sd257/systemd-resolvconf-257*.pkg.tar.xz
-}
+    in_rootfs pacman -U --noconfirm --nodeps "${SD_PKGS[@]}" || \
+        die "systemd downgrade to 257 failed even with --nodeps"
+fi
 in_rootfs systemctl --version | head -1
 in_rootfs pacman -Q systemd | grep -q '257\.' || die "systemd is not at 257"
 
