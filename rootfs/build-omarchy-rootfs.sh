@@ -74,11 +74,22 @@ mount_pseudo() {
     mkdir -p "$ROOTFS"/{proc,sys,dev,dev/pts,tmp,run,etc/pacman.d}
     # the official image does not ship an mtab, and pacman needs one
     [ -e "$ROOTFS/etc/mtab" ] || ln -sf /proc/self/mounts "$ROOTFS/etc/mtab"
+
+    # The runner's /etc/resolv.conf points at the systemd-resolved stub on
+    # 127.0.0.53, which the chroot cannot reach: every download then fails with
+    # "Could not resolve host". Swap in public resolvers for the build only.
+    if grep -qE '^[[:space:]]*nameserver[[:space:]]+127\.' /etc/resolv.conf; then
+        log "host resolv.conf uses a loopback stub - using 1.1.1.1 / 8.8.8.8"
+        printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' > "$ROOTFS/etc/resolv.conf"
+    else
+        cp /etc/resolv.conf "$ROOTFS/etc/resolv.conf"
+    fi
+    printf '127.0.0.1\tlocalhost\n::1\tlocalhost\n' > "$ROOTFS/etc/hosts"
+
     mount -t proc  proc  "$ROOTFS/proc"
     mount -t sysfs sysfs "$ROOTFS/sys"
     mount --bind /dev      "$ROOTFS/dev"
     mount --bind /dev/pts  "$ROOTFS/dev/pts"
-    cp /etc/resolv.conf "$ROOTFS/etc/resolv.conf"
 }
 
 unmount_pseudo() {
@@ -102,18 +113,24 @@ log "free space at $WORK: ${avail} GiB"
 [ "$avail" -ge 12 ] || die "need at least 12 GiB free, have ${avail} GiB"
 
 # ------------------------------------------------------------------ 1. base rootfs
+# The ALARM tarball is the default: docker pull is rate-limited from GitHub
+# runners (both archlinux:latest and arm64v8/archlinux:latest were denied
+# repeatedly), while the tarball came down at 75 MB/s. Set USE_DOCKER=1 to
+# prefer docker anyway.
 log "staging base rootfs"
-# arm64v8/* was retired on Docker Hub and now returns "pull access denied",
-# so try the official multi-arch image first and keep the old name as a
-# fallback. Both are verified to be aarch64 before use.
 BASE_IMAGE=""
-for candidate in archlinux:latest arm64v8/archlinux:latest; do
-    if docker pull -q "$candidate" >/dev/null 2>&1; then
-        BASE_IMAGE=$candidate
-        break
-    fi
-    log "pull failed: $candidate"
-done
+if [ "${USE_DOCKER:-0}" = "1" ] && docker info >/dev/null 2>&1; then
+    # arm64v8/* was retired on Docker Hub and now returns "pull access denied",
+    # so try the official multi-arch image first and keep the old name as a
+    # fallback.
+    for candidate in archlinux:latest arm64v8/archlinux:latest; do
+        if docker pull -q "$candidate" >/dev/null 2>&1; then
+            BASE_IMAGE=$candidate
+            break
+        fi
+        log "pull failed: $candidate"
+    done
+fi
 
 if [ -n "$BASE_IMAGE" ]; then
     log "using $BASE_IMAGE via docker export"
@@ -121,7 +138,7 @@ if [ -n "$BASE_IMAGE" ]; then
     docker export "$cid" | tar -xpf - -C "$ROOTFS"
     docker rm -f "$cid" >/dev/null
 else
-    warn "no docker image available, falling back to the ALARM tarball"
+    log "using the ALARM aarch64 tarball ($ALARM_URL)"
     [ -f "$CACHE/alarm.tar.gz" ] || \
         curl -fL --retry 3 --retry-delay 5 -o "$CACHE/alarm.tar.gz" "$ALARM_URL"
     tar -xpf "$CACHE/alarm.tar.gz" -C "$ROOTFS"
