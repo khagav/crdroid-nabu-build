@@ -1,0 +1,53 @@
+name: relay-facetimehd-data
+on:
+  push:
+    branches: [ relay-facetimehd ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  extract-calibration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Install 7zip
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq p7zip-full
+          which 7z || (sudo apt-get install -y -qq 7zip; which 7z)
+
+      - name: Download BootCamp 5.1.5769 zip (Apple)
+        run: |
+          URL="https://download.info.apple.com/Mac_OS_X/031-30890-20150812-ea191174-4130-11e5-a125-930911ba098f/bootcamp5.1.5769.zip"
+          curl -fL --retry 5 --retry-all-errors --speed-time 60 --speed-limit 2048 \
+               --retry-delay 5 -C - -o bc.zip "$URL"
+          echo "4ede2c8ef240708c850237a3e5911094ed6adae1734258e4639bc9069a814b1e  bc.zip" | sha256sum -c -
+
+      - name: Extract calibration .dat files
+        run: |
+          7z x -y bc.zip 'BootCamp/Drivers/Apple/AppleCamera64.exe' >/dev/null
+          7z x -y 'BootCamp/Drivers/Apple/AppleCamera64.exe' >/dev/null
+          [ -f AppleCamera.sys ] || { echo "AppleCamera.sys not found"; ls -la; exit 1; }
+          dd bs=1 skip=1663920 count=33060 if=AppleCamera.sys of=9112_01XX.dat
+          dd bs=1 skip=1644880 count=19040 if=AppleCamera.sys of=1771_01XX.dat
+          dd bs=1 skip=1606800 count=19040 if=AppleCamera.sys of=1871_01XX.dat
+          dd bs=1 skip=1625840 count=19040 if=AppleCamera.sys of=1874_01XX.dat
+          ls -l *_01XX.dat
+          sha256sum *_01XX.dat
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: relay-facetimehd-data
+          name: facetimehd calibration data (Apple BootCamp 5.1.5769)
+          body: |
+            Sensor calibration data for facetimehd (Broadcom 14e4:1570).
+            Extracted from Apple bootcamp5.1.5769.zip, sha256 verified.
+            Source: https://github.com/patjak/facetimehd/wiki/Extracting-the-sensor-calibration-files
+          files: |
+            9112_01XX.dat
+            1771_01XX.dat
+            1871_01XX.dat
+            1874_01XX.dat
