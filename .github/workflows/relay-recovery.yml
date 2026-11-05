@@ -94,6 +94,4 @@ jobs:
           bash scripts/publish.sh --file recovery.img \
             --tag "nabu-recovery-${{ github.event.inputs.build_date }}" \
             --title "crDroid nabu recovery — ${{ github.event.inputs.build_date }}" \
-            --notes "Official crDroid recovery image for nabu.
-size: ${MIB} MiB
-sha256: $SHA"
+            --notes "Official crDroid recovery image for nabu. size: ${MIB} MiB, sha256: $SHA"
