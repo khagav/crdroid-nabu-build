@@ -1,0 +1,99 @@
+name: relay-recovery
+
+# Relay the crDroid nabu recovery image from SourceForge to a GitHub Release,
+# so it can be pulled back over a mirror/accelerator instead of a residential
+# link. The recovery file is 96 MiB (100663296 bytes) and supports Range, so it
+# is safe to resume. The byte count is resolved dynamically so a package
+# refresh cannot silently truncate the download.
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_date:
+        description: 'Recovery build date (YYYYMMDD)'
+        required: true
+        type: string
+        default: '20261103'
+
+permissions:
+  contents: write
+
+env:
+  SF_DIR: https://sourceforge.net/projects/crdroid/files/nabu/13.x
+
+jobs:
+  relay:
+    name: fetch recovery, verify, release
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download recovery
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -u
+          URL="$SF_DIR/recovery/download"
+          EXPECT=$(curl -sIL "$URL" | tr -d '\r' | sed -n 's/^[Cc]ontent-[Ll]ength: *//p' | tail -1)
+          [ -n "${EXPECT:-}" ] || { echo "::error::could not resolve recovery content-length"; exit 1; }
+          echo "expected: $EXPECT bytes"
+
+          MIRRORS="netix jaist cfhcable pilotfiber phoenixnap tenet"
+          N=$(echo $MIRRORS | wc -w)
+          fails=0
+          attempt=0
+          while :; do
+            have=0
+            [ -f recovery.img ] && have=$(wc -c < recovery.img | tr -d ' ')
+            if [ "$have" -ge "$EXPECT" ]; then
+              echo "complete: $have bytes"
+              break
+            fi
+            if [ "$fails" -ge 8 ]; then
+              echo "::error::8 consecutive attempts made no progress at $have bytes"
+              exit 1
+            fi
+            attempt=$((attempt + 1))
+            M=$(echo $MIRRORS | cut -d' ' -f $(( (attempt - 1) % N + 1 )))
+            echo "--- attempt $attempt  mirror=$M  have=$have ---"
+            curl -fL -C - \
+                 --speed-time 60 --speed-limit 2048 \
+                 --retry 2 --retry-delay 5 --retry-all-errors \
+                 -o recovery.img "$URL?use_mirror=$M" || true
+            new=0
+            [ -f recovery.img ] && new=$(wc -c < recovery.img | tr -d ' ')
+            if [ "$new" -gt "$have" ]; then
+              fails=0
+              echo "  +$((new - have)) bytes, now $new"
+            else
+              fails=$((fails + 1))
+              echo "::warning::mirror $M made no progress (fail $fails/8), rotating"
+            fi
+          done
+          ls -lh recovery.img
+
+          SIZE=$(wc -c < recovery.img | tr -d ' ')
+          MIB=$((SIZE / 1048576))
+          [ "$MIB" -ge 80 ] || { echo "::error::recovery too small ($MIB MiB) - truncated?"; exit 1; }
+          SHA=$(sha256sum recovery.img | awk '{print $1}')
+          echo "size=${SIZE} sha256=$SHA"
+          {
+            echo "### crDroid nabu recovery"
+            echo
+            echo "| item | value |"
+            echo "|---|---|"
+            echo "| file | \`recovery.img\` |"
+            echo "| size | ${MIB} MiB |"
+            echo "| sha256 | \`$SHA\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          bash scripts/publish.sh --file recovery.img \
+            --tag "nabu-recovery-${{ github.event.inputs.build_date }}" \
+            --title "crDroid nabu recovery — ${{ github.event.inputs.build_date }}" \
+            --notes "Official crDroid recovery image for nabu.
+size: ${MIB} MiB
+sha256: $SHA"
