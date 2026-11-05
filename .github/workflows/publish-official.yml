@@ -59,9 +59,14 @@ jobs:
         shell: bash
         env:
           NAME: crDroidAndroid-${{ github.event.inputs.android_version }}-${{ github.event.inputs.build_date }}-nabu-v${{ github.event.inputs.cr_version }}.zip
-          EXPECT: '1524594287'
         run: |
           set -u
+          # Resolve the real byte count from SourceForge instead of hardcoding
+          # it: if the zip grows, a stale EXPECT would make the loop below
+          # declare "complete" early and truncate the file.
+          EXPECT=$(curl -sIL "$SF_DIR/$NAME/download" | tr -d '\r' | sed -n 's/^[Cc]ontent-[Ll]ength: *//p' | tail -1)
+          [ -n "${EXPECT:-}" ] || { echo "::error::could not resolve content-length for $NAME"; exit 1; }
+          echo "expected: $EXPECT bytes"
           # SourceForge mirrors stall mid-transfer: measured on a residential
           # link, the auto-selected mirror delivered 241 KB and then sat at
           # 0 B/s forever. A plain `curl -fL --retry` does not notice that --
